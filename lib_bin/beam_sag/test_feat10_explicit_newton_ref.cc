@@ -46,9 +46,9 @@ const SolidMaterialProperties mat_beam_mr =
 
 constexpr double kTotalForce = 10000.0;  // N, +z on the x = 3 face
 
-// Tracked node per resolution, same as test_feat10_explicit.
+// Tracked node per resolution: the corner (3, 2, 1), same as test_feat10_explicit.
 const std::map<int, int> kTargetNode = {{0, 23},     {2, 89},    {4, 353},
-                                        {8, 1408},   {16, 5630}, {32, 22529}};
+                                        {8, 1409},   {16, 5633}, {32, 22529}};
 
 std::string JoinPath(const std::string& a, const std::string& b) {
   if (a.empty())
