@@ -17,12 +17,6 @@
 
 #include "FEAT10DataOpt.cuh"
 
-// Material parameters for Mooney-Rivlin, fixed at compile time and declared in
-// FEAT10DataOpt.cuh so callers and tests can read what the kernel will use.
-// GPU_FEAT10Opt_Data::SetMooneyRivlin rejects any other values.
-constexpr float kMu10 = GPU_FEAT10Opt_Data::kMu10;
-constexpr float kMu01 = GPU_FEAT10Opt_Data::kMu01;
-constexpr float kBulkK = GPU_FEAT10Opt_Data::kBulkK;
 constexpr float kMinJthreshold = 1e-6f;
 // Kelvin-Voigt damping is fixed at compile time for now to keep the fused
 // kernel's register usage down; setting both to 0 compiles the damping path
@@ -87,6 +81,7 @@ __global__ void internalF_MooneyRivlin_4QP(
     float* __restrict__ pInternalForceNodes,
     float* __restrict__ pDeformationGradientF,
     float* __restrict__ pPiolaStressP,
+    float mu10, float mu01, float bulkK,  // Mooney-Rivlin material
     bool writeOutDefGradientF, bool writeOutPiolaP) {
   // Define a tile of four threads; each thread handles one quadrature point
   constexpr int TILE = 4;
@@ -894,11 +889,11 @@ __global__ void internalF_MooneyRivlin_4QP(
                        2.0f * (S01 * S01 + S02 * S02 + S12 * S12);
     const float I2m3 = 2.0f * trS + 0.5f * (trS * trS - trS2);  // I2 - 3
 
-    const float cW = 2.0f * hatJ * (kMu10 + 2.0f * hatJ * kMu01);
-    const float c01 = 2.0f * hatJ * hatJ * kMu01;
-    const float cInv = kBulkK * Jm1 * J -
+    const float cW = 2.0f * hatJ * (mu10 + 2.0f * hatJ * mu01);
+    const float c01 = 2.0f * hatJ * hatJ * mu01;
+    const float cInv = bulkK * Jm1 * J -
                        (2.0f / 3.0f) * hatJ *
-                           (kMu10 * trS + 2.0f * hatJ * kMu01 * I2m3);
+                           (mu10 * trS + 2.0f * hatJ * mu01 * I2m3);
 
     // T = trS I - S, reusing the S registers
     S00 = trS - S00;

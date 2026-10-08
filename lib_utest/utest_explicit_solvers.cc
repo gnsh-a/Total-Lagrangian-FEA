@@ -29,9 +29,11 @@
 
 namespace {
 
-const double kMu10 = GPU_FEAT10Opt_Data::kMu10;
-const double kMu01 = GPU_FEAT10Opt_Data::kMu01;
-const double kBulkK = GPU_FEAT10Opt_Data::kBulkK;
+// Mooney-Rivlin from E = 3e8, nu = 0.4: mu10 = 0.3 mu, mu01 = 0.2 mu,
+// kappa = 1.5 K (the bunny and explicit-beam material).
+const double kMu10 = 32142857.142857143;
+const double kMu01 = 21428571.428571429;
+const double kBulkK = 7.5e8;
 const double kRho = 2700.0;
 
 const double kEpsDouble = 2.2e-16;

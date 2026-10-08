@@ -16,7 +16,6 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
-#include <sstream>
 #include <stdexcept>
 #include <vector>
 
@@ -371,22 +370,6 @@ void GPU_FEAT10Opt_Data::Destroy() {
 
 void GPU_FEAT10Opt_Data::SetMooneyRivlin(float mu10_val, float mu01_val,
                                         float kappa) {
-  // The internal force kernel uses the compile-time constants declared in
-  // FEAT10DataOpt.cuh, so any other material would be silently ignored.
-  // TODO: pass mu10, mu01, bulkK to the kernel as arguments and drop this
-  // guard and the constants. Measured 2026-10-02: same registers (72/80)
-  // and kernel time (res16), the values ride in the parameter constant bank.
-  auto differs = [](float a, float b) {
-    return std::abs(a - b) > 1e-6f * std::abs(b);
-  };
-  if (differs(mu10_val, kMu10) || differs(mu01_val, kMu01) ||
-      differs(kappa, kBulkK)) {
-    std::ostringstream msg;
-    msg << "FEAT10Opt: SetMooneyRivlin(" << mu10_val << ", " << mu01_val << ", "
-        << kappa << ") does not match the compiled constants (" << kMu10 << ", "
-        << kMu01 << ", " << kBulkK << ")";
-    throw std::invalid_argument(msg.str());
-  }
   mu10 = mu10_val;
   mu01 = mu01_val;
   bulkK = kappa;
@@ -489,6 +472,10 @@ void GPU_FEAT10Opt_Data::ClearInternalForce() {
 void GPU_FEAT10Opt_Data::ComputeInternalForce(const double* d_vel_nodes,
                                               bool writeOutF, bool writeOutP) {
   assert(is_precomputed && "Must call ComputePrecomputation() first");
+  if (bulkK <= 0.0f) {
+    throw std::logic_error(
+        "FEAT10Opt: SetMooneyRivlin() must be called before ComputeInternalForce()");
+  }
 
   // Allocate F buffer if needed and requested
   if (writeOutF && d_deformation_grad_F == nullptr) {
@@ -679,5 +666,6 @@ void launchInternalForceKernel_FEAT10Opt(const GPU_FEAT10Opt_Data* host_data,
       d_vel_nodes,
       host_data->d_elem_nodes_soa, host_data->d_iso_map_inv,
       host_data->d_internal_force, host_data->d_deformation_grad_F,
-      host_data->d_piola_stress_P, writeOutF, writeOutP);
+      host_data->d_piola_stress_P, host_data->mu10, host_data->mu01,
+      host_data->bulkK, writeOutF, writeOutP);
 }

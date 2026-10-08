@@ -31,9 +31,16 @@
 
 namespace {
 
-const double kMu10 = GPU_FEAT10Opt_Data::kMu10;
-const double kMu01 = GPU_FEAT10Opt_Data::kMu01;
-const double kBulkK = GPU_FEAT10Opt_Data::kBulkK;
+// Mooney-Rivlin from E = 3e8, nu = 0.4: mu10 = 0.3 mu, mu01 = 0.2 mu,
+// kappa = 1.5 K (the bunny and explicit-beam material).
+const double kMu10 = 32142857.142857143;
+const double kMu01 = 21428571.428571429;
+const double kBulkK = 7.5e8;
+
+struct Material {
+  double mu10, mu01, kappa;
+};
+const Material kBunnyMR{kMu10, kMu01, kBulkK};
 
 // Relative tolerance on force and stress, derived as follows. The kernel
 // builds J - 1 from H with ~10 float roundings (10 node terms plus the trace),
@@ -72,13 +79,14 @@ void ReadBeamRes0(Eigen::MatrixXd& X, Eigen::MatrixXi& E) {
 Eigen::VectorXd StandardForce(const Eigen::MatrixXd& X,
                               const Eigen::MatrixXi& E,
                               const Eigen::MatrixXd& x,
-                              Eigen::Matrix3d* P0 = nullptr) {
+                              Eigen::Matrix3d* P0 = nullptr,
+                              const Material& m = kBunnyMR) {
   GPU_FEAT10_Data element(E.rows(), X.rows());
   element.Initialize();
   element.Setup(Quadrature::tet5pt_x, Quadrature::tet5pt_y,
                 Quadrature::tet5pt_z, Quadrature::tet5pt_weights, X.col(0),
                 X.col(1), X.col(2), E);
-  element.SetMooneyRivlin(kMu10, kMu01, kBulkK);
+  element.SetMooneyRivlin(m.mu10, m.mu01, m.kappa);
   element.CalcDnDuPre();
   element.UpdatePositions(x.col(0), x.col(1), x.col(2));
   element.CalcP();
@@ -98,11 +106,12 @@ Eigen::VectorXd StandardForce(const Eigen::MatrixXd& X,
 Eigen::VectorXd OptForce(const Eigen::MatrixXd& X, const Eigen::MatrixXi& E,
                          const Eigen::MatrixXd& x,
                          Eigen::Matrix3d* F0 = nullptr,
-                         Eigen::Matrix3d* P0 = nullptr) {
+                         Eigen::Matrix3d* P0 = nullptr,
+                         const Material& m = kBunnyMR) {
   GPU_FEAT10Opt_Data element;
   element.Initialize(E.rows(), X.rows());
   element.Setup(X, E);
-  element.SetMooneyRivlin(kMu10, kMu01, kBulkK);
+  element.SetMooneyRivlin(m.mu10, m.mu01, m.kappa);
   element.ComputePrecomputation();
   element.UpdatePositions(x);
   element.ClearInternalForce();
@@ -220,25 +229,19 @@ TEST(FEAT10OptForce, F_and_P_MatchStandard) {
   EXPECT_LE(p_rel, kRelTol);
 }
 
-TEST(FEAT10OptForce, SetMooneyRivlin_AcceptsCompiledMaterial) {
-  // The kernel folds the material in at compile time; the setter must accept
-  // exactly those values, or every comparison above runs on two materials.
-  GPU_FEAT10Opt_Data element;
-  element.Initialize(1, 10);
-  element.Setup(UnitT10Nodes(), OneElement());
-  EXPECT_NO_THROW(element.SetMooneyRivlin(GPU_FEAT10Opt_Data::kMu10,
-                                          GPU_FEAT10Opt_Data::kMu01,
-                                          GPU_FEAT10Opt_Data::kBulkK));
-  element.Destroy();
-}
-
-TEST(FEAT10OptForce, SetMooneyRivlin_RejectsOtherMaterial) {
-  GPU_FEAT10Opt_Data element;
-  element.Initialize(1, 10);
-  element.Setup(UnitT10Nodes(), OneElement());
-  EXPECT_THROW(element.SetMooneyRivlin(0.5f * GPU_FEAT10Opt_Data::kMu10,
-                                       GPU_FEAT10Opt_Data::kMu01,
-                                       GPU_FEAT10Opt_Data::kBulkK),
-               std::invalid_argument);
-  element.Destroy();
+TEST(FEAT10OptForce, OtherMaterial_MatchesStandard) {
+  // The material is a kernel argument: a second Mooney-Rivlin material (TL-FEA
+  // Part II beam: E = 7e8, nu = 0.33) must match the standard element too.
+  // kRelTol holds: 10 eps kappa / (2 mu) = 10 * 1.2e-7 * 1.03e9 / 2.63e8 = 4.7e-6.
+  const double mu = 7e8 / (2.0 * 1.33), K = 7e8 / (3.0 * (1.0 - 2.0 * 0.33));
+  const Material beam_mr{0.3 * mu, 0.2 * mu, 1.5 * K};
+  Eigen::MatrixXd X;
+  Eigen::MatrixXi E;
+  ReadBeamRes0(X, E);
+  Eigen::MatrixXd x = Deform(X, GeneralF());
+  Eigen::VectorXd f_std = StandardForce(X, E, x, nullptr, beam_mr);
+  Eigen::VectorXd f_opt = OptForce(X, E, x, nullptr, nullptr, beam_mr);
+  double rel = MaxAbs(f_opt - f_std) / MaxAbs(f_std);
+  Report("Part II beam MR, general", rel, kRelTol);
+  EXPECT_LE(rel, kRelTol);
 }
