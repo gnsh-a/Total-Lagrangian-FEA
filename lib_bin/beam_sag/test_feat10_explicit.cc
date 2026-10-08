@@ -41,6 +41,17 @@ constexpr double kMR_mu01  = 21428571.428571429;  // Pa (0.20 * mu)
 constexpr double kMR_kappa = 7.5e8;               // Pa (1.5 * bulk modulus)
 constexpr double kMR_rho   = 920.0;               // kg/m³
 
+// --part2: TL-FEA Part II beam benchmark, as in test_feat10_resolution.
+// 5 kN total in +x on the x = 3 face, held; Mooney-Rivlin derived from the
+// SVK beam above (mu10 = 0.3 mu, mu01 = 0.2 mu, kappa = 1.5 K, rho 2700).
+constexpr double kPart2Mu      = kE / (2.0 * (1.0 + kNu));
+constexpr double kPart2K       = kE / (3.0 * (1.0 - 2.0 * kNu));
+constexpr double kPart2Force   = 5000.0;  // N, total in +x
+
+struct MooneyRivlin {
+  double mu10, mu01, kappa, rho;
+};
+
 // Kelvin-Voigt damping applied with --damp. Must match the FEAT10Opt kernel
 // constants (see FEAT10KernelOpt.cuh).
 constexpr double kEtaDamp    = 1.0e2;  // Pa·s
@@ -51,6 +62,7 @@ enum class MaterialKind { kSVK, kMR };
 struct Options {
   bool use_opt          = false;
   bool damp             = false;
+  bool part2            = false;
   MaterialKind material = MaterialKind::kSVK;
   double dt             = 1e-5;
   int steps             = 5000;
@@ -63,11 +75,13 @@ struct Options {
 
 void PrintUsage(const char* argv0) {
   std::cout << "Usage: " << argv0
-            << " [--opt] [--damp] [--mat=MAT] [--res=R] [--dt=DT] [--steps=N] [--csv[=PATH]]"
-               " [--csv-interval=N] [--csv-force] [--help]\n"
+            << " [--opt] [--damp] [--part2] [--mat=MAT] [--res=R] [--dt=DT] [--steps=N]"
+               " [--csv[=PATH]] [--csv-interval=N] [--csv-force] [--help]\n"
             << "  --opt            Use FEAT10Opt + SyncedExplicitOpt (default: standard)\n"
             << "  --damp           Kelvin-Voigt damping (eta = lambda = 1e2); with --opt\n"
             << "                   the kernel must be built without --config=opt_nodamp\n"
+            << "  --part2          TL-FEA Part II beam: 5 kN in +x, held; beam MR at rho 2700\n"
+            << "                   (default: 10 kN in +z, released at steps/2; bunny MR at rho 920)\n"
             << "  --mat=MAT        svk | mr (default: svk; ignored with --opt, forces MR)\n"
             << "  --res=R          0 | 2 | 4 | 8 | 16 | 32 (default: 0)\n"
             << "  --dt=DT          Time step size (default: 1e-5)\n"
@@ -137,6 +151,10 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
     }
     if (arg == "--damp") {
       opt.damp = true;
+      continue;
+    }
+    if (arg == "--part2") {
+      opt.part2 = true;
       continue;
     }
     if (StartsWith(arg, "--mat=")) {
@@ -273,9 +291,9 @@ int main(int argc, char** argv) {
   } else if (opt.res == 4) {
     plot_target_node = 353;
   } else if (opt.res == 8) {
-    plot_target_node = 1408;
+    plot_target_node = 1409;
   } else if (opt.res == 16) {
-    plot_target_node = 5630;
+    plot_target_node = 5633;
   } else if (opt.res == 32) {
     plot_target_node = 22529;
   }
@@ -317,7 +335,18 @@ int main(int argc, char** argv) {
       force_node_indices.push_back(i);
     }
   }
-  const double kForceZ = 10000.0;  // 10 kN total in +Z direction
+  // Load: 10 kN in +z released at steps/2, or with --part2 5 kN in +x, held
+  const int force_axis      = opt.part2 ? 0 : 2;
+  const double force_total  = opt.part2 ? kPart2Force : 10000.0;
+  const int release_step    = opt.part2 ? -1 : opt.steps / 2;
+  const MooneyRivlin mr     = opt.part2
+      ? MooneyRivlin{0.3 * kPart2Mu, 0.2 * kPart2Mu, 1.5 * kPart2K, kRho0}
+      : MooneyRivlin{kMR_mu10, kMR_mu01, kMR_kappa, kMR_rho};
+  std::cout << "Problem: " << (opt.part2 ? "part2" : "release") << ", "
+            << force_total << " N on " << force_node_indices.size()
+            << " nodes along axis " << force_axis << ", "
+            << fixed_nodes.size() << " fixed nodes, tracked node "
+            << plot_target_node << std::endl;
 
   // Open CSV file if requested (common setup)
   std::ofstream csv_file;
@@ -358,8 +387,8 @@ int main(int argc, char** argv) {
     GPU_FEAT10Opt_Data gpu_feat10opt;
     gpu_feat10opt.Initialize(n_elems, n_nodes);
     gpu_feat10opt.Setup(positions, elements);
-    gpu_feat10opt.SetMooneyRivlin(kMR_mu10, kMR_mu01, kMR_kappa);
-    gpu_feat10opt.SetDensity(kMR_rho);
+    gpu_feat10opt.SetMooneyRivlin(mr.mu10, mr.mu01, mr.kappa);
+    gpu_feat10opt.SetDensity(mr.rho);
     const double eta_damp    = opt.damp ? kEtaDamp : 0.0;
     const double lambda_damp = opt.damp ? kLambdaDamp : 0.0;
     gpu_feat10opt.SetDamping(static_cast<float>(eta_damp),
@@ -367,8 +396,8 @@ int main(int argc, char** argv) {
     std::cout << "Damping: eta=" << eta_damp << ", lambda=" << lambda_damp
               << std::endl;
 
-    std::cout << "Material (MR): mu10=" << kMR_mu10 << ", mu01=" << kMR_mu01
-              << ", kappa=" << kMR_kappa << std::endl;
+    std::cout << "Material (MR): mu10=" << mr.mu10 << ", mu01=" << mr.mu01
+              << ", kappa=" << mr.kappa << ", rho=" << mr.rho << std::endl;
 
     gpu_feat10opt.ComputePrecomputation();
     gpu_feat10opt.ComputeLumpedMassHRZ();
@@ -378,9 +407,9 @@ int main(int argc, char** argv) {
     f_ext.setZero();
     if (!force_node_indices.empty()) {
       const float force_per_node =
-          static_cast<float>(kForceZ) / static_cast<float>(force_node_indices.size());
+          static_cast<float>(force_total) / static_cast<float>(force_node_indices.size());
       for (int idx : force_node_indices) {
-        f_ext(3 * idx + 2) = force_per_node;  // +Z direction
+        f_ext(3 * idx + force_axis) = force_per_node;
       }
     }
 
@@ -390,7 +419,7 @@ int main(int argc, char** argv) {
     solver.SetExternalForce(f_ext);
 
     for (int step = 0; step < opt.steps; ++step) {
-      if (step == opt.steps / 2) {
+      if (step == release_step) {
         f_ext.setZero();
         solver.SetExternalForce(f_ext);
       }
@@ -459,10 +488,10 @@ int main(int argc, char** argv) {
       gpu_t10_data.SetSVK(kE, kNu);
       std::cout << "Material: SVK (E=" << kE << ", nu=" << kNu << ")" << std::endl;
     } else {
-      gpu_t10_data.SetDensity(kMR_rho);
-      gpu_t10_data.SetMooneyRivlin(kMR_mu10, kMR_mu01, kMR_kappa);
-      std::cout << "Material (MR): mu10=" << kMR_mu10 << ", mu01=" << kMR_mu01
-                << ", kappa=" << kMR_kappa << std::endl;
+      gpu_t10_data.SetDensity(mr.rho);
+      gpu_t10_data.SetMooneyRivlin(mr.mu10, mr.mu01, mr.kappa);
+      std::cout << "Material (MR): mu10=" << mr.mu10 << ", mu01=" << mr.mu01
+                << ", kappa=" << mr.kappa << ", rho=" << mr.rho << std::endl;
     }
 
     const double eta_damp    = opt.damp ? kEtaDamp : 0.0;
@@ -477,9 +506,9 @@ int main(int argc, char** argv) {
     Eigen::VectorXd h_f_ext(gpu_t10_data.get_n_coef() * 3);
     h_f_ext.setZero();
     if (!force_node_indices.empty()) {
-      const double force_per_node = kForceZ / force_node_indices.size();
+      const double force_per_node = force_total / force_node_indices.size();
       for (int idx : force_node_indices) {
-        h_f_ext(3 * idx + 2) = force_per_node;  // +Z direction
+        h_f_ext(3 * idx + force_axis) = force_per_node;
       }
     }
     gpu_t10_data.SetExternalForce(h_f_ext);
@@ -490,7 +519,7 @@ int main(int argc, char** argv) {
     solver.SetFixedNodes(fixed_nodes);
 
     for (int step = 0; step < opt.steps; ++step) {
-      if (step == opt.steps / 2) {
+      if (step == release_step) {
         h_f_ext.setZero();
         gpu_t10_data.SetExternalForce(h_f_ext);
       }
