@@ -7,7 +7,7 @@
  * Brief:   FEAT10 bunny explicit dynamics demo. Supports both
  *          standard (FEAT10 + SyncedExplicit) and optimized
  *          (FEAT10Opt + SyncedExplicitOpt) solver paths via
- *          --opt flag. Clamps base, loads ears, releases halfway.
+ *          --opt flag. Clamps base, loads ears, releases at 1 s.
  *==============================================================
  *==============================================================*/
 
@@ -52,8 +52,7 @@ constexpr double kLambdaDamp = 1.0e2;  // Pa·s
 constexpr double kFixedZThreshold = -4.0;   // fix nodes with z < this
 constexpr double kForceZThreshold = 4.0;    // apply force to nodes with z > this
 constexpr double kForceZ          = -35000.0; // N, downward on ears
-// Release load at step so that t_release = 1 s when dt=1e-5 (match Newton: 1000*1e-3=1 s). Total steps set for 8 s at dt=1e-5.
-constexpr int kForceReleaseStep = 100000;  // 100000 * 1e-5 = 1 s loaded
+constexpr double kReleaseTime     = 1.0;      // s, load removed (as Newton: 1000 * 1e-3)
 
 enum class MaterialKind { kSVK, kMR };
 
@@ -126,8 +125,8 @@ void PrintUsage(const char* argv0) {
             << "  --damp           Kelvin-Voigt damping (eta = lambda = 1e2); with --opt\n"
             << "                   the kernel must be built without --config=opt_nodamp\n"
       << "  --mat=MAT        svk | mr (default: svk; ignored with --opt)\n"
-      << "  --dt=DT          Time step (default: 1e-6)\n"
-      << "  --steps=N        Number of steps (default: 5000)\n"
+      << "  --dt=DT          Time step (default: 1e-5)\n"
+      << "  --steps=N        Number of steps (default: 800000, 8 s at 1e-5)\n"
       << "  --csv[=P]        Write CSV output (optional path)\n"
       << "  --csv-interval=N Write CSV row every N steps (default: 1)\n"
       << "  --csv-force      Include internal_force_l2 column in CSV\n"
@@ -395,8 +394,9 @@ int main(int argc, char** argv) {
     solver.SetFixedNodes(fixed_nodes);
     solver.SetExternalForce(f_ext);
 
-    // Release force at 1s: force_release_step = 1.0 / dt
-    const int force_release_step = static_cast<int>(1.0 / opt.dt);
+    // Release at kReleaseTime; round, since 1.0 / 1e-5 truncates to 99999
+    const int force_release_step =
+        static_cast<int>(std::lround(kReleaseTime / opt.dt));
     for (int step = 0; step < opt.steps; ++step) {
       if (step == force_release_step) {
         f_ext.setZero();
@@ -502,8 +502,9 @@ int main(int argc, char** argv) {
     solver.SetFixedNodes(fixed_nodes);
 
     int vtk_frame = 0;
-    // Release force at 1s: force_release_step = 1.0 / dt
-    const int force_release_step = static_cast<int>(1.0 / opt.dt);
+    // Release at kReleaseTime; round, since 1.0 / 1e-5 truncates to 99999
+    const int force_release_step =
+        static_cast<int>(std::lround(kReleaseTime / opt.dt));
 
     for (int step = 0; step < opt.steps; ++step) {
       if (step == force_release_step) {
