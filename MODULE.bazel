@@ -45,3 +45,7 @@ new_local_repository(
 
 # Register CUDA toolchains provided by rules_cuda
 register_toolchains("@rules_cuda//cuda:all")
+
+# Optional: fetched/built only by IPC targets, never by legacy solver targets.
+ipc_sources = use_repo_rule("//third_party/ipc:repository.bzl", "ipc_sources")
+ipc_sources(name = "ipc_toolkit")

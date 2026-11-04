@@ -1,0 +1,19 @@
+load("@rules_foreign_cc//foreign_cc:defs.bzl", "cmake")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+package(default_visibility = ["//visibility:public"])
+filegroup(name = "sources", srcs = glob(["**"], exclude = ["BUILD.bazel"]))
+cmake(
+    name = "compiled",
+    lib_source = ":sources",
+    cache_entries = {"CMAKE_BUILD_TYPE": "Release", "CMAKE_POLICY_VERSION_MINIMUM": "3.5"},
+    generate_args = ["-GUnix Makefiles"],
+    build_args = ["--parallel", "6"],
+    out_static_libs = ["libipc_toolkit.a", "libtight_inclusion.a", "libscalable_ccd.a", "libpredicates.a", "libTinyAD.a", "libspdlog.a"],
+    out_shared_libs = ["libtbb.so", "libtbb.so.12"],
+)
+cc_library(
+    name = "toolkit",
+    deps = [":compiled", "@eigen//:eigen"],
+    defines = ["SPDLOG_COMPILED_LIB"],
+    linkopts = ["-pthread", "-ldl"],
+)

@@ -1,0 +1,58 @@
+[
+  {
+    "name": "ipc",
+    "url": "https://codeload.github.com/ipc-sim/ipc-toolkit/tar.gz/19bcab7e1f5a0d2addfcd28513422ff248ea504e",
+    "sha256": "e1ad8b624b0acecacd72b173d120b00cfb09cffa79a6c889bda528c01aea6d9c",
+    "revision": "19bcab7e1f5a0d2addfcd28513422ff248ea504e",
+    "strip_prefix": "ipc-toolkit-19bcab7e1f5a0d2addfcd28513422ff248ea504e"
+  },
+  {
+    "name": "libigl",
+    "url": "https://codeload.github.com/libigl/libigl/tar.gz/v2.6.0",
+    "sha256": "fe3bf58571cccbef774947261284ccf6b7fdf04fcab5f7181e31931e42a0b14f",
+    "revision": "v2.6.0",
+    "strip_prefix": "libigl-2.6.0"
+  },
+  {
+    "name": "predicates",
+    "url": "https://codeload.github.com/libigl/libigl-predicates/tar.gz/decb7bc1260e689cbe008109e3cc5d3a5a433aea",
+    "sha256": "fd6ff88eff602ea8a600ddd22057e19d876f1f1a9bf9c119a3ecfef1753c5e92",
+    "revision": "decb7bc1260e689cbe008109e3cc5d3a5a433aea",
+    "strip_prefix": "libigl-predicates-decb7bc1260e689cbe008109e3cc5d3a5a433aea"
+  },
+  {
+    "name": "onetbb",
+    "url": "https://codeload.github.com/uxlfoundation/oneTBB/tar.gz/v2022.3.0",
+    "sha256": "01598a46c1162c27253a0de0236f520fd8ee8166e9ebb84a4243574f88e6e50a",
+    "revision": "v2022.3.0",
+    "strip_prefix": "oneTBB-2022.3.0"
+  },
+  {
+    "name": "tight",
+    "url": "https://codeload.github.com/Continuous-Collision-Detection/Tight-Inclusion/tar.gz/v1.0.6",
+    "sha256": "ed44caa4b253371637beeadefb064333174bb79ef7a0fb7ae09a40206e2e8b5f",
+    "revision": "v1.0.6",
+    "strip_prefix": "Tight-Inclusion-1.0.6"
+  },
+  {
+    "name": "scalable",
+    "url": "https://codeload.github.com/Continuous-Collision-Detection/scalable-ccd/tar.gz/ccf4bc19aba432b9d5abdd41ae55d15ea166a0a5",
+    "sha256": "f24ecc2a404aa5010aa0af7db5fd97eed60762533d1e8c42231b6ffabde9e34d",
+    "revision": "ccf4bc19aba432b9d5abdd41ae55d15ea166a0a5",
+    "strip_prefix": "Scalable-CCD-ccf4bc19aba432b9d5abdd41ae55d15ea166a0a5"
+  },
+  {
+    "name": "spdlog",
+    "url": "https://codeload.github.com/gabime/spdlog/tar.gz/v1.17.0",
+    "sha256": "d8862955c6d74e5846b3f580b1605d2428b11d97a410d86e2fb13e857cd3a744",
+    "revision": "v1.17.0",
+    "strip_prefix": "spdlog-1.17.0"
+  },
+  {
+    "name": "tinyad",
+    "url": "https://codeload.github.com/zfergus/tinyad/tar.gz/957ede5bcf4b8d924f27230083508c664a9f7a7d",
+    "sha256": "8e7131616b84ddaa505572201e0fdecaeb7b1961fc7e0ba9e0af6d6ba8619e2d",
+    "revision": "957ede5bcf4b8d924f27230083508c664a9f7a7d",
+    "strip_prefix": "TinyAD-957ede5bcf4b8d924f27230083508c664a9f7a7d"
+  }
+]

@@ -1,0 +1,53 @@
+diff --git a/ipc/src/ipc/collisions/normal/normal_collisions_builder.cpp b/ipc/src/ipc/collisions/normal/normal_collisions_builder.cpp
+--- a/ipc/src/ipc/collisions/normal/normal_collisions_builder.cpp
++++ b/ipc/src/ipc/collisions/normal/normal_collisions_builder.cpp
+@@ -224,9 +224,8 @@
+         break;
+ 
+     case EdgeEdgeDistanceType::EA_EB:
+-        ee_collisions.emplace_back(
++        add_edge_edge_collision(
+             eai, ebi, eps_x, weight, weight_gradient, actual_dtype);
+-        ee_to_id.emplace(ee_collisions.back(), ee_collisions.size() - 1);
+         break;
+ 
+     case EdgeEdgeDistanceType::AUTO:
+diff --git a/ipc/src/ipc/collisions/normal/normal_collisions_builder.hpp b/ipc/src/ipc/collisions/normal/normal_collisions_builder.hpp
+--- a/ipc/src/ipc/collisions/normal/normal_collisions_builder.hpp
++++ b/ipc/src/ipc/collisions/normal/normal_collisions_builder.hpp
+@@ -135,10 +135,31 @@
+         const Eigen::SparseVector<double>& weight_gradient,
+         const EdgeEdgeDistanceType dtype)
+     {
+-        add_edge_edge_collision(
+-            EdgeEdgeNormalCollision(
+-                edge0_id, edge1_id, eps_x, weight, weight_gradient, dtype),
+-            ee_to_id, ee_collisions);
++        // EE candidate equality is unordered, while distance types are
++        // directional. Canonicalize BOTH before hashing/merging; otherwise
++        // reversed mollified EV stencils can merge unrelated distances and
++        // make the potential depend on TBB's thread partitioning.
++        EdgeEdgeNormalCollision collision(
++            edge0_id, edge1_id, eps_x, weight, weight_gradient, dtype);
++        if (collision.edge0_id > collision.edge1_id) {
++            std::swap(collision.edge0_id, collision.edge1_id);
++            switch (collision.dtype) {
++            case EdgeEdgeDistanceType::EA0_EB1:
++                collision.dtype = EdgeEdgeDistanceType::EA1_EB0; break;
++            case EdgeEdgeDistanceType::EA1_EB0:
++                collision.dtype = EdgeEdgeDistanceType::EA0_EB1; break;
++            case EdgeEdgeDistanceType::EA_EB0:
++                collision.dtype = EdgeEdgeDistanceType::EA0_EB; break;
++            case EdgeEdgeDistanceType::EA0_EB:
++                collision.dtype = EdgeEdgeDistanceType::EA_EB0; break;
++            case EdgeEdgeDistanceType::EA_EB1:
++                collision.dtype = EdgeEdgeDistanceType::EA1_EB; break;
++            case EdgeEdgeDistanceType::EA1_EB:
++                collision.dtype = EdgeEdgeDistanceType::EA_EB1; break;
++            default: break; // endpoint 00/11, interior-interior, AUTO
++            }
++        }
++        add_edge_edge_collision(collision, ee_to_id, ee_collisions);
+     }
+ 
+     // -------------------------------------------------------------------------
