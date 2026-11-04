@@ -1,3 +1,5 @@
+#include "../../lib_utils/t10_quadrature.h"
+#include <stdexcept>
 #include <cooperative_groups.h>
 #include <thrust/device_ptr.h>
 #include <thrust/execution_policy.h>
@@ -156,9 +158,9 @@ __global__ void dn_du_pre_kernel(GPU_FEAT10_Data *d_data) {
   double X_elem[10][3];  // 10 nodes × 3 coordinates
   for (int node = 0; node < 10; node++) {
     int global_node_idx = d_data->element_connectivity()(elem_idx, node);
-    X_elem[node][0]     = d_data->x12()(global_node_idx);  // x coordinate
-    X_elem[node][1]     = d_data->y12()(global_node_idx);  // y coordinate
-    X_elem[node][2]     = d_data->z12()(global_node_idx);  // z coordinate
+    X_elem[node][0] = d_data->reference_position(global_node_idx, 0);
+    X_elem[node][1] = d_data->reference_position(global_node_idx, 1);
+    X_elem[node][2] = d_data->reference_position(global_node_idx, 2);
   }
 
   // Compute Jacobian matrix J = Σ(X_node ⊗ dN_dxi)
@@ -204,78 +206,36 @@ __global__ void dn_du_pre_kernel(GPU_FEAT10_Data *d_data) {
   }
 }
 
-__global__ void mass_matrix_qp_kernel(GPU_FEAT10_Data *d_data) {
-  int n_qp_per_elem = Quadrature::N_QP_T10_5;  // 5 quadrature points
-  int thread_global = blockIdx.x * blockDim.x + threadIdx.x;
-
-  // Decode: which element and which (i, j) node pair?
-  int elem       = thread_global / (10 * 10);  // 10 nodes per element
-  int item_local = thread_global % (10 * 10);
-
-  if (elem >= d_data->gpu_n_elem())
-    return;
-
-  // Decode item_local into (i_local, j_local) node indices
-  int i_local = item_local / 10;  // Local node i (0-9)
-  int j_local = item_local % 10;  // Local node j (0-9)
-
-  // Get global node indices
-  int i_global = d_data->element_connectivity()(elem, i_local);
-  int j_global = d_data->element_connectivity()(elem, j_local);
-
-  // Get material density
-  double rho = d_data->rho0(elem);
-
-  // Accumulator for this (i, j) pair across all QPs
-  double mass_contribution = 0.0;
-
-  // Loop over all quadrature points
-  for (int qp = 0; qp < n_qp_per_elem; qp++) {
-    // Get quadrature point coordinates
-    double xi   = d_data->tet5pt_x(qp);
-    double eta  = d_data->tet5pt_y(qp);
-    double zeta = d_data->tet5pt_z(qp);
-    double wq   = d_data->tet5pt_weights(qp);
-    // printf("xi: %f, eta: %f, zeta: %f, wq: %f\n", xi, eta, zeta, wq);
-
-    // Compute barycentric coordinates
-    double L1   = 1.0 - xi - eta - zeta;
-    double L2   = xi;
-    double L3   = eta;
-    double L4   = zeta;
-    double L[4] = {L1, L2, L3, L4};
-
-    // Compute shape functions
-    double N[10];
-
-    // Corner nodes (0-3)
-    for (int k = 0; k < 4; k++) {
-      N[k] = L[k] * (2.0 * L[k] - 1.0);
-    }
-
-    // Edge nodes (4-9)
-    int edges[6][2] = {{0, 1}, {1, 2}, {0, 2}, {0, 3}, {1, 3}, {2, 3}};
-    for (int k = 0; k < 6; k++) {
-      int ii   = edges[k][0];
-      int jj   = edges[k][1];
-      N[k + 4] = 4.0 * L[ii] * L[jj];
-    }
-
-    // Get determinant (pre-computed)
-    double detJ = d_data->detJ_ref(elem, qp);
-
-    // Accumulate: rho * N[i] * N[j] * detJ * wq
-    mass_contribution += rho * N[i_local] * N[j_local] * detJ * wq;
+__global__ void mass_matrix_qp_kernel(GPU_FEAT10_Data *d_data, int *invalid) {
+  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  const int elem = tid / 100, i = (tid % 100) / 10, j = tid % 10;
+  if (elem >= d_data->gpu_n_elem()) return;
+  const auto conn = d_data->element_connectivity();
+  double X[10][3];
+  for (int a = 0; a < 10; ++a) {
+    const int n = conn(elem, a);
+    X[a][0] = d_data->reference_position(n, 0);
+    X[a][1] = d_data->reference_position(n, 1);
+    X[a][2] = d_data->reference_position(n, 2);
   }
-
-  const int row_start = d_data->csr_offsets()[i_global];
-  const int row_end   = d_data->csr_offsets()[i_global + 1];
-  const int n_cols    = row_end - row_start;
-  const int local_idx = binary_search_column_csr_mass(
-      d_data->csr_columns() + row_start, n_cols, j_global);
-  if (local_idx >= 0) {
-    atomicAdd(d_data->csr_values() + row_start + local_idx, mass_contribution);
+  const double rho = d_data->rho0(elem);
+  if (!(rho > 0) || !isfinite(rho)) { atomicExch(invalid, 1); return; }
+  double mass = 0;
+  for (int q = 0; q < t10::kMassPoints; ++q) {
+    double x, y, z, w, N[10], G[10][3];
+    t10::MassPoint(q, x, y, z, w);
+    t10::Shape(x, y, z, N, G);
+    const double det = t10::JacobianDet(X, G);
+    if (!(det > 0) || !isfinite(det)) { atomicExch(invalid, 1); return; }
+    mass += rho * N[i] * N[j] * det * w;
   }
+  const int row = conn(elem, i), col = conn(elem, j);
+  const int begin = d_data->csr_offsets()[row];
+  const int end = d_data->csr_offsets()[row + 1];
+  const int slot = binary_search_column_csr_mass(d_data->csr_columns() + begin,
+                                                end - begin, col);
+  if (slot < 0) { atomicExch(invalid, 2); return; }
+  atomicAdd(d_data->csr_values() + begin + slot, mass);
 }
 
 __global__ void calc_constraint_kernel(GPU_FEAT10_Data *d_data) {
@@ -379,8 +339,19 @@ void GPU_FEAT10_Data::CalcMassMatrix() {
   int threads_per_block = 128;
   int blocks = (total_threads + threads_per_block - 1) / threads_per_block;
 
-  mass_matrix_qp_kernel<<<blocks, threads_per_block>>>(d_data);
-  HANDLE_ERROR(cudaDeviceSynchronize());
+  if (total_threads == 0) return;
+  int *d_invalid = nullptr, invalid = 0;
+  HANDLE_ERROR(cudaMalloc(&d_invalid, sizeof(int)));
+  HANDLE_ERROR(cudaMemset(d_invalid, 0, sizeof(int)));
+  mass_matrix_qp_kernel<<<blocks, threads_per_block>>>(d_data, d_invalid);
+  HANDLE_ERROR(cudaGetLastError());
+  HANDLE_ERROR(cudaMemcpy(&invalid, d_invalid, sizeof(int), cudaMemcpyDeviceToHost));
+  HANDLE_ERROR(cudaFree(d_invalid));
+  if (invalid) {
+    HANDLE_ERROR(cudaMemset(d_csr_values, 0, static_cast<size_t>(h_nnz) * sizeof(double)));
+    throw std::runtime_error(invalid == 2 ? "T10 mass CSR pattern is incomplete" :
+        "T10 mass requires positive density and positive reference Jacobians");
+  }
 }
 
 void GPU_FEAT10_Data::BuildMassCSRPattern() {
@@ -910,13 +881,13 @@ void GPU_FEAT10_Data::RetrieveReferencePositionToCPU(Eigen::VectorXd &x_ref,
   y_ref.resize(total_nodes);
   z_ref.resize(total_nodes);
 
-  HANDLE_ERROR(cudaMemcpy(x_ref.data(), d_h_x12_jac,
+  HANDLE_ERROR(cudaMemcpy(x_ref.data(), d_reference_positions,
                            total_nodes * sizeof(double),
                            cudaMemcpyDeviceToHost));
-  HANDLE_ERROR(cudaMemcpy(y_ref.data(), d_h_y12_jac,
+  HANDLE_ERROR(cudaMemcpy(y_ref.data(), d_reference_positions + n_coef,
                            total_nodes * sizeof(double),
                            cudaMemcpyDeviceToHost));
-  HANDLE_ERROR(cudaMemcpy(z_ref.data(), d_h_z12_jac,
+  HANDLE_ERROR(cudaMemcpy(z_ref.data(), d_reference_positions + 2*n_coef,
                            total_nodes * sizeof(double),
                            cudaMemcpyDeviceToHost));
 }

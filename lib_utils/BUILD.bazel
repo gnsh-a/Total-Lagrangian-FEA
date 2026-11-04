@@ -14,6 +14,7 @@ cc_library(
     hdrs = [
         "cpu_utils.h",
         "quadrature_utils.h",
+        "t10_quadrature.h",
     ],
     copts = ["--std=c++17"],
     deps = ["@eigen//:eigen"],

@@ -5,6 +5,7 @@
 #include <Eigen/Dense>
 #include <algorithm>
 #include <iostream>
+#include <stdexcept>
 #include <vector>
 
 #include "../../lib_utils/cuda_utils.h"
@@ -119,6 +120,10 @@ struct GPU_FEAT10_Data : public ElementBase {
     return Eigen::Map<Eigen::MatrixXd>(
         d_grad_N_ref + (elem_idx * Quadrature::N_QP_T10_5 + qp_idx) * 10 * 3,
         10, 3);
+  }
+
+  __device__ double reference_position(int node, int axis) const {
+    return d_reference_positions[axis * n_coef + node];
   }
 
   __device__ double &detJ_ref(int elem_idx, int qp_idx) {
@@ -674,6 +679,7 @@ struct GPU_FEAT10_Data : public ElementBase {
   }
 
   void Initialize() {
+    HANDLE_ERROR(cudaMalloc(&d_reference_positions, 3 * n_coef * sizeof(double)));
     HANDLE_ERROR(cudaMalloc(&d_h_x12, n_coef * sizeof(double)));
     HANDLE_ERROR(cudaMalloc(&d_h_y12, n_coef * sizeof(double)));
     HANDLE_ERROR(cudaMalloc(&d_h_z12, n_coef * sizeof(double)));
@@ -752,6 +758,10 @@ struct GPU_FEAT10_Data : public ElementBase {
     HANDLE_ERROR(cudaMemcpy(d_h_z12_jac, h_z12.data(), n_coef * sizeof(double),
                             cudaMemcpyHostToDevice));
 
+    HANDLE_ERROR(cudaMemcpy(d_reference_positions, h_x12.data(), n_coef * sizeof(double), cudaMemcpyHostToDevice));
+    HANDLE_ERROR(cudaMemcpy(d_reference_positions + n_coef, h_y12.data(), n_coef * sizeof(double), cudaMemcpyHostToDevice));
+    HANDLE_ERROR(cudaMemcpy(d_reference_positions + 2*n_coef, h_z12.data(), n_coef * sizeof(double), cudaMemcpyHostToDevice));
+
     HANDLE_ERROR(cudaMemcpy(d_element_connectivity, element_connectivity.data(),
                             n_elem * Quadrature::N_NODE_T10_10 * sizeof(int),
                             cudaMemcpyHostToDevice));
@@ -775,6 +785,7 @@ struct GPU_FEAT10_Data : public ElementBase {
                             n_elem * Quadrature::N_QP_T10_5 * sizeof(double)));
 
     cudaMemset(d_f_int, 0, n_coef * 3 * sizeof(double));
+    cudaMemset(d_f_ext, 0, n_coef * 3 * sizeof(double));
 
     cudaMemset(d_F, 0,
                n_elem * Quadrature::N_QP_T10_5 * 3 * 3 * sizeof(double));
@@ -1239,6 +1250,7 @@ struct GPU_FEAT10_Data : public ElementBase {
 
   // Free memory
   void Destroy() {
+    HANDLE_ERROR(cudaFree(d_reference_positions));
     HANDLE_ERROR(cudaFree(d_h_x12));
     HANDLE_ERROR(cudaFree(d_h_y12));
     HANDLE_ERROR(cudaFree(d_h_z12));
@@ -1363,6 +1375,8 @@ struct GPU_FEAT10_Data : public ElementBase {
  private:
   // Node positions (global, or per element)
   double *d_h_x12, *d_h_y12, *d_h_z12;  // (n_coef, 1)
+  // Immutable material coordinates, independent of moving constraint targets.
+  double *d_reference_positions = nullptr;
   double *d_h_x12_jac, *d_h_y12_jac, *d_h_z12_jac;
 
   // Element connectivity
