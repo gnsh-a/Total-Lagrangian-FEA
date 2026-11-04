@@ -139,3 +139,20 @@ cuda_library(
         "@eigen//:eigen",
     ],
 )
+
+cuda_library(
+    name = "ipc_t10_model",
+    srcs = ["IpcT10Model.cu"],
+    hdrs = ["IpcT10Model.h"],
+    copts = ["--std=c++17", "-O2", "--fmad=false"],
+    deps = ["//lib_src/elements:FEAT10Data", "//lib_src/materials:materials", "//lib_utils:cpu_utils", "@eigen//:eigen"],
+)
+
+cc_library(
+    name = "ipc_newton",
+    srcs = ["IpcNewton.cc"],
+    hdrs = ["IpcNewton.h", "SolverBase.h"],
+    copts = ["-O2", "-fno-fast-math"],
+    linkopts = ["-L/usr/local/cuda/lib64", "-lcudart", "-lcudss"],
+    deps = [":ipc_t10_model", "//lib_src/contact:ipc_contact", "@eigen//:eigen"],
+)

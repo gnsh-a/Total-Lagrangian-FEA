@@ -588,6 +588,21 @@ struct GPU_FEAT10_Data : public ElementBase {
     return n_general_nonlinear_dot_constraint > 0;
   }
 
+  Eigen::VectorXd GeneralConstraintTargets() const {
+    if (constraint_mode_ != kFEAT10ConstraintGeneral) return {};
+    Eigen::VectorXd targets(n_constraint);
+    HANDLE_ERROR(cudaMemcpy(targets.data(), d_general_constraint_targets,
+                            n_constraint * sizeof(double), cudaMemcpyDeviceToHost));
+    return targets;
+  }
+
+  void UpdateGeneralConstraintTargets(const Eigen::VectorXd& targets) {
+    if (constraint_mode_ != kFEAT10ConstraintGeneral || targets.size() != n_constraint ||
+        !targets.allFinite()) throw std::invalid_argument("Invalid general constraint targets");
+    HANDLE_ERROR(cudaMemcpy(d_general_constraint_targets, targets.data(),
+                            n_constraint * sizeof(double), cudaMemcpyHostToDevice));
+  }
+
   __host__ __device__ int get_n_elem() const {
     return n_elem;
   }

@@ -64,6 +64,11 @@ static SurfaceTriMesh ExtractSurfaceTriMeshFromT10(
     const Eigen::MatrixXd& nodes, const Eigen::MatrixXi& elements,
     const MeshInstance& inst) {
   SurfaceTriMesh out;
+  if (nodes.cols() != 3 || elements.cols() != 10 || !nodes.allFinite() ||
+      inst.element_offset < 0 || inst.num_elements < 0 ||
+      inst.element_offset > elements.rows() - inst.num_elements) {
+    throw std::invalid_argument("Invalid T10 surface extraction input");
+  }
   std::unordered_map<int, int> global_to_local;
 
   std::unordered_map<std::array<int, 3>, std::vector<FaceRecord>, Array3Hash>
@@ -72,6 +77,13 @@ static SurfaceTriMesh ExtractSurfaceTriMeshFromT10(
   for (int e = 0; e < inst.num_elements; ++e) {
     const int elem_idx = inst.element_offset + e;
     const auto tet     = elements.row(elem_idx);
+    for (int a = 0; a < 10; ++a) {
+      if (tet[a] < 0 || tet[a] >= nodes.rows())
+        throw std::invalid_argument("T10 surface contains an invalid node ID");
+      for (int b = 0; b < a; ++b)
+        if (tet[a] == tet[b])
+          throw std::invalid_argument("T10 element repeats a node");
+    }
 
     const int n0 = tet(0);
     const int n1 = tet(1);
@@ -102,6 +114,28 @@ static SurfaceTriMesh ExtractSurfaceTriMeshFromT10(
   }
 
   for (const auto& kv : faces) {
+    if (kv.second.size() > 2)
+      throw std::invalid_argument(
+          "Nonmanifold T10 face has more than two elements");
+    if (kv.second.size() == 2) {
+      const auto& a = kv.second[0];
+      const auto& b = kv.second[1];
+      for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) {
+          if (std::minmax(a.corners[i], a.corners[(i + 1) % 3]) ==
+                  std::minmax(b.corners[j], b.corners[(j + 1) % 3]) &&
+              a.mids[i] != b.mids[j])
+            throw std::invalid_argument(
+                "Nonconforming T10 midside nodes on an interior face");
+        }
+      const Eigen::Vector3d p = NodePos(nodes, a.corners[0]);
+      const Eigen::Vector3d n = (NodePos(nodes, a.corners[1]) - p)
+                                    .cross(NodePos(nodes, a.corners[2]) - p);
+      if (n.dot(NodePos(nodes, a.opp) - p) * n.dot(NodePos(nodes, b.opp) - p) >=
+          0)
+        throw std::invalid_argument(
+            "Overlapping T10 elements at an interior face");
+    }
     if (kv.second.size() != 1)
       continue;  // interior face
     FaceRecord f = kv.second.front();
@@ -245,15 +279,11 @@ SurfaceTriMesh ExtractSurfaceTriMeshFromANCF3243(
 
     // Generate 4 corner vertices at each end of the beam.
     std::array<Eigen::Vector3d, 4> corners0 = {
-        p0 + hw * y0 + hh * z0,
-        p0 - hw * y0 + hh * z0,
-        p0 - hw * y0 - hh * z0,
+        p0 + hw * y0 + hh * z0, p0 - hw * y0 + hh * z0, p0 - hw * y0 - hh * z0,
         p0 + hw * y0 - hh * z0};
 
     std::array<Eigen::Vector3d, 4> corners1 = {
-        p1 + hw * y1 + hh * z1,
-        p1 - hw * y1 + hh * z1,
-        p1 - hw * y1 - hh * z1,
+        p1 + hw * y1 + hh * z1, p1 - hw * y1 + hh * z1, p1 - hw * y1 - hh * z1,
         p1 + hw * y1 - hh * z1};
 
     // Synthetic global IDs for collision system vertex tracking.
@@ -298,4 +328,3 @@ SurfaceTriMesh ExtractSurfaceTriMeshFromANCF3243(
 }
 
 }  // namespace ANCFCPUUtils
-

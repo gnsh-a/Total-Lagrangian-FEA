@@ -158,3 +158,9 @@ cc_test(
     srcs = ["utest_ipc_contact.cc"],
     deps = ["//lib_src/contact:ipc_contact", "@googletest//:gtest_main", "@eigen//:eigen"],
 )
+cc_test(
+    name = "utest_ipc_solver",
+    srcs = ["utest_ipc_solver.cc"],
+    tags = ["requires-gpu"],
+    deps = ["//lib_src/solvers:ipc_newton", "//lib_src/constraints:FEAT10ConstraintManager", "//lib_utils:surface_trimesh_extract", "@googletest//:gtest_main", "@eigen//:eigen"],
+)
