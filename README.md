@@ -110,3 +110,11 @@ If you use TL-FEA in your work, please cite:
   url     = {https://arxiv.org/abs/2604.10357}
 }
 ```
+
+## CPU IPC contact for T10 solids
+
+The coupled CPU IPC contact implementation, runnable examples and numerical
+formulation are documented in [docs/ipc/README.md](docs/ipc/README.md).
+See [known issues](docs/ipc/KNOWN_ISSUES.md) before selecting contact parameters.
+Start with `scripts/run_ipc.sh --case=brick --steps=10 --stiffness=1000`.
+GPU contact migration and material damping support are deferred.
