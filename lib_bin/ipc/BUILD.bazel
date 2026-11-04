@@ -1,0 +1,13 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+package(default_visibility = ["//visibility:public"])
+cc_binary(
+    name = "contact_demo",
+    srcs = ["contact_demo.cc"],
+    data = ["//:data_meshes"],
+    deps = ["//lib_src/solvers:ipc_newton", "//lib_utils:cli_utils", "//lib_utils:mesh_manager", "//lib_utils:surface_trimesh_extract", "@eigen//:eigen"],
+)
+cc_binary(
+    name = "hertz_validation",
+    srcs = ["hertz_validation.cc"],
+    deps = ["//lib_src/solvers:ipc_newton", "//lib_utils:cli_utils", "//lib_utils:surface_trimesh_extract", "@eigen//:eigen"],
+)
