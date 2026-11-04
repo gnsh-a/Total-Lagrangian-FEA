@@ -1,0 +1,9 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+package(default_visibility = ["//visibility:public"])
+cc_library(
+    name = "ipc_contact",
+    srcs = ["IpcContact.cc"],
+    hdrs = ["IpcContact.h"],
+    copts = ["-O2", "-fno-fast-math", "-ffp-contract=off"],
+    deps = ["@ipc_toolkit//:toolkit", "@eigen//:eigen", "//lib_utils:surface_trimesh"],
+)

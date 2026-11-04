@@ -152,3 +152,9 @@ cc_test(
     tags = ["requires-gpu"],
     deps = ["//lib_src/elements:FEAT10Data", "//lib_utils:cpu_utils", "@eigen//:eigen", "@googletest//:gtest_main"],
 )
+
+cc_test(
+    name = "utest_ipc_contact",
+    srcs = ["utest_ipc_contact.cc"],
+    deps = ["//lib_src/contact:ipc_contact", "@googletest//:gtest_main", "@eigen//:eigen"],
+)
