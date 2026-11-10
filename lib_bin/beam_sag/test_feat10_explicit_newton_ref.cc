@@ -69,6 +69,10 @@ int main(int argc, char** argv) {
   cli.AddDouble("dt", 1e-3, "time step (s)");
   cli.AddOptionalString("csv", "",
                         "write the tracked node's position every step");
+  cli.AddOptionalString("frames", "",
+                        "append all node positions (float64 x,y,z per node) every "
+                        "frame-interval steps, for animations");
+  cli.AddInt("frame-interval", 10, "steps between frames written to --frames");
 
   std::string cli_err;
   if (!cli.Parse(argc, argv, &cli_err) || cli.HelpRequested()) {
@@ -178,6 +182,15 @@ int main(int argc, char** argv) {
   data.CalcP();
   data.CalcInternalForce();
 
+  std::ofstream frames_file;
+  const int frame_interval = cli.GetInt("frame-interval");
+  if (cli.IsSet("frames") && !cli.GetString("frames").empty() && frame_interval > 0) {
+    frames_file.open(cli.GetString("frames"), std::ios::binary);
+    std::cout << "Writing frames: " << cli.GetString("frames") << " (every " << frame_interval
+              << " steps, " << n_nodes << " nodes)" << std::endl;
+  }
+  std::vector<double> frame_buf;
+
   std::ofstream csv_file;
   if (!csv_path.empty()) {
     csv_file.open(csv_path);
@@ -213,6 +226,16 @@ int main(int argc, char** argv) {
               << std::endl;
     if (csv_file.is_open()) {
       csv_file << step << "," << x << "," << y << "," << z << "\n";
+    }
+    if (frames_file.is_open() && (step + 1) % frame_interval == 0) {
+      frame_buf.resize(3 * static_cast<size_t>(n_nodes));
+      for (int i = 0; i < n_nodes; ++i) {
+        frame_buf[3 * i]     = x12(i);
+        frame_buf[3 * i + 1] = y12(i);
+        frame_buf[3 * i + 2] = z12(i);
+      }
+      frames_file.write(reinterpret_cast<const char*>(frame_buf.data()),
+                        frame_buf.size() * sizeof(double));
     }
   }
 

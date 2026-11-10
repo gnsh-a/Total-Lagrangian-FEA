@@ -71,6 +71,8 @@ struct Options {
   std::string csv_path;
   int csv_interval      = 1;      // write CSV row every N steps
   bool csv_force        = false;  // include internal_force_l2 column
+  std::string frames_path;         // all node positions, raw float64 x,y,z per node, appended every frame_interval
+  int frame_interval    = 1000;
 };
 
 void PrintUsage(const char* argv0) {
@@ -89,6 +91,8 @@ void PrintUsage(const char* argv0) {
             << "  --csv[=PATH]     Write CSV output (default path if not specified)\n"
             << "  --csv-interval=N Write CSV row every N steps (default: 1)\n"
             << "  --csv-force      Include internal_force_l2 column in CSV\n"
+            << "  --frames=PATH    Append all node positions (float64 x,y,z per node) every\n"
+            << "                   --frame-interval steps (default 1000) to PATH, for animations\n"
             << "  --help           Show this message\n";
 }
 
@@ -205,6 +209,18 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
       const std::string v = arg.substr(std::string("--csv-interval=").size());
       if (!ParseInt(v, opt.csv_interval) || opt.csv_interval <= 0) {
         std::cerr << "Invalid --csv-interval: " << v << "\n";
+        return false;
+      }
+      continue;
+    }
+    if (StartsWith(arg, "--frames=")) {
+      opt.frames_path = arg.substr(std::string("--frames=").size());
+      continue;
+    }
+    if (StartsWith(arg, "--frame-interval=")) {
+      const std::string v = arg.substr(std::string("--frame-interval=").size());
+      if (!ParseInt(v, opt.frame_interval) || opt.frame_interval <= 0) {
+        std::cerr << "Invalid --frame-interval: " << v << "\n";
         return false;
       }
       continue;
@@ -366,6 +382,14 @@ int main(int argc, char** argv) {
              << (opt.csv_force ? ",internal_force_l2" : "") << "\n";
   }
 
+  std::ofstream frames_file;
+  if (!opt.frames_path.empty()) {
+    frames_file.open(opt.frames_path, std::ios::binary);
+    std::cout << "Writing frames: " << opt.frames_path << " (every " << opt.frame_interval
+              << " steps, " << n_nodes << " nodes)" << std::endl;
+  }
+  std::vector<double> frame_buf;
+
   // Timing events for per-step Solve() measurement
   cudaEvent_t timing_start, timing_stop;
   HANDLE_ERROR(cudaEventCreate(&timing_start));
@@ -435,6 +459,14 @@ int main(int argc, char** argv) {
       if (((step + 1) % 500) == 0 || step == opt.steps - 1) {
         std::cout << "Progress: step " << (step + 1) << "/" << opt.steps
                   << std::endl;
+      }
+
+      if (frames_file.is_open() && (step + 1) % opt.frame_interval == 0) {
+        frame_buf.resize(3 * static_cast<size_t>(n_nodes));
+        HANDLE_ERROR(cudaMemcpy(frame_buf.data(), gpu_feat10opt.GetPositionDevicePtr(),
+                                frame_buf.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        frames_file.write(reinterpret_cast<const char*>(frame_buf.data()),
+                          frame_buf.size() * sizeof(double));
       }
 
       const bool is_csv_step = opt.write_csv &&
