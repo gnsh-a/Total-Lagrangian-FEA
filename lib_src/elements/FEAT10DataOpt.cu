@@ -465,12 +465,14 @@ void GPU_FEAT10Opt_Data::ComputeLumpedMassHRZ() {
       cudaMemcpy(d_data, this, sizeof(GPU_FEAT10Opt_Data), cudaMemcpyHostToDevice));
 }
 
-void GPU_FEAT10Opt_Data::ClearInternalForce() {
-  HANDLE_ERROR(cudaMemset(d_internal_force, 0, 3 * n_nodes * sizeof(float)));
+void GPU_FEAT10Opt_Data::ClearInternalForce(cudaStream_t stream) {
+  HANDLE_ERROR(cudaMemsetAsync(d_internal_force, 0, 3 * n_nodes * sizeof(float),
+                               stream));
 }
 
 void GPU_FEAT10Opt_Data::ComputeInternalForce(const double* d_vel_nodes,
-                                              bool writeOutF, bool writeOutP) {
+                                              bool writeOutF, bool writeOutP,
+                                              cudaStream_t stream) {
   assert(is_precomputed && "Must call ComputePrecomputation() first");
   if (bulkK <= 0.0f) {
     throw std::logic_error(
@@ -496,7 +498,7 @@ void GPU_FEAT10Opt_Data::ComputeInternalForce(const double* d_vel_nodes,
   }
 
   launchInternalForceKernel_FEAT10Opt(this, n_elem_padded, d_vel_nodes,
-                                      writeOutF, writeOutP);
+                                      writeOutF, writeOutP, stream);
 }
 
 void GPU_FEAT10Opt_Data::SetExternalForce(const Eigen::VectorXf& f_ext) {
@@ -654,14 +656,16 @@ void GPU_FEAT10Opt_Data::RetrievePiolaToCPU(
 void launchInternalForceKernel_FEAT10Opt(const GPU_FEAT10Opt_Data* host_data,
                                          int n_elem_padded,
                                          const double* d_vel_nodes,
-                                         bool writeOutF, bool writeOutP) {
+                                         bool writeOutF, bool writeOutP,
+                                         cudaStream_t stream) {
   constexpr int BLOCK_SIZE = 64;
   int num_blocks = n_elem_padded / 16;
 
   // Shared memory: 2 matrices (H, invJacobian) * 9 components * 64 threads
   size_t shared_mem_size = getInternalForceKernelSharedMemSize(BLOCK_SIZE);
 
-  internalF_MooneyRivlin_4QP<<<num_blocks, BLOCK_SIZE, shared_mem_size>>>(
+  internalF_MooneyRivlin_4QP<<<num_blocks, BLOCK_SIZE, shared_mem_size,
+                               stream>>>(
       host_data->n_elem, host_data->d_pos_nodes, host_data->d_pos_nodes_ref,
       d_vel_nodes,
       host_data->d_elem_nodes_soa, host_data->d_iso_map_inv,

@@ -65,12 +65,33 @@ Eigen::MatrixXd Stack(const Eigen::VectorXd& x, const Eigen::VectorXd& y,
   return p;
 }
 
+// Step pieces for SolveN in the graph test: uneven, so several graphs are
+// built and one is relaunched.
+const std::vector<int> kPieces = {1, 7, 100, 192};  // 300 steps
+
+// Advance with plain Solve() per step (graph off), or with graphs over kPieces.
+template <typename Solver>
+void Advance(Solver& solver, int n_steps, ExplicitGraphMode mode) {
+  solver.SetGraphMode(mode);
+  if (mode == ExplicitGraphMode::kOff) {
+    for (int s = 0; s < n_steps; s++) solver.Solve();
+    return;
+  }
+  int done = 0;
+  for (int k : kPieces) {
+    solver.SolveN(k);
+    done += k;
+  }
+  EXPECT_EQ(done, n_steps);
+}
+
 // Standard path: positions after n_steps; f_ext_per_mass is the external
 // force per unit nodal mass (a uniform acceleration), applied to every node.
 // Returns the smallest lumped mass through m_min.
 Eigen::MatrixXd RunStandard(const Eigen::MatrixXd& X, const Eigen::MatrixXi& E,
                             double accel, const std::vector<int>& fixed,
-                            double dt, int n_steps, double* m_min = nullptr) {
+                            double dt, int n_steps, double* m_min = nullptr,
+                            ExplicitGraphMode mode = ExplicitGraphMode::kOff) {
   GPU_FEAT10_Data element(E.rows(), X.rows());
   element.Initialize();
   element.Setup(Quadrature::tet5pt_x, Quadrature::tet5pt_y,
@@ -93,7 +114,7 @@ Eigen::MatrixXd RunStandard(const Eigen::MatrixXd& X, const Eigen::MatrixXi& E,
   SyncedExplicitParams params = {dt};
   solver.SetParameters(&params);
   solver.SetFixedNodes(fixed);
-  for (int s = 0; s < n_steps; s++) solver.Solve();
+  Advance(solver, n_steps, mode);
 
   Eigen::VectorXd x, y, z;
   element.RetrievePositionToCPU(x, y, z);
@@ -105,7 +126,8 @@ Eigen::MatrixXd RunStandard(const Eigen::MatrixXd& X, const Eigen::MatrixXi& E,
 // what the solver multiplies by inv_m again.
 Eigen::MatrixXd RunOpt(const Eigen::MatrixXd& X, const Eigen::MatrixXi& E,
                        double accel, const std::vector<int>& fixed, double dt,
-                       int n_steps) {
+                       int n_steps,
+                       ExplicitGraphMode mode = ExplicitGraphMode::kOff) {
   GPU_FEAT10Opt_Data element;
   element.Initialize(E.rows(), X.rows());
   element.Setup(X, E);
@@ -124,7 +146,7 @@ Eigen::MatrixXd RunOpt(const Eigen::MatrixXd& X, const Eigen::MatrixXi& E,
   solver.SetTimeStep(dt);
   solver.SetFixedNodes(fixed);
   solver.SetExternalForce(f_ext);
-  for (int s = 0; s < n_steps; s++) solver.Solve();
+  Advance(solver, n_steps, mode);
 
   Eigen::VectorXd x, y, z;
   element.RetrievePositionToCPU(x, y, z);
@@ -221,4 +243,33 @@ TEST(ExplicitSolvers, FixedNodes_StayFixed) {
     EXPECT_EQ(moved_fixed, 0.0);
     EXPECT_GT(moved_any, 0.0);
   }
+}
+
+// CUDA graphs run the same kernels in the same order as plain launches, so the
+// only difference is the order of the atomic adds in the force scatter, which
+// can change between any two runs. A node sums at most 12 element
+// contributions on the res0 beam, so a reordered sum differs by up to
+// 12 eps of the force; in this linear, stable response a relative force error
+// gives at most twice that relative displacement error (step load), plus the
+// position round-off N eps |X|.
+TEST(ExplicitSolvers, Graphs_MatchPlainLaunches) {
+  Eigen::MatrixXd X;
+  Eigen::MatrixXi E;
+  ReadBeamRes0(X, E);
+  const std::vector<int> fixed = NodesOnFaceX0(X);
+  const double a = 1.0, dt = 1e-5;
+  const int n = 300;
+  Eigen::MatrixXd ref_std = RunStandard(X, E, a, fixed, dt, n);
+  Eigen::MatrixXd ref_opt = RunOpt(X, E, a, fixed, dt, n);
+  const double tol_std = 2 * 12 * kEpsDouble * MaxAbs(ref_std - X) +
+                         n * kEpsDouble * MaxAbs(X);
+  const double tol_opt = 2 * 12 * kEpsFloat * MaxAbs(ref_opt - X) +
+                         n * kEpsDouble * MaxAbs(X);
+  const ExplicitGraphMode g = ExplicitGraphMode::kUnrolled;
+  double d_std = MaxAbs(RunStandard(X, E, a, fixed, dt, n, nullptr, g) - ref_std);
+  double d_opt = MaxAbs(RunOpt(X, E, a, fixed, dt, n, g) - ref_opt);
+  Report("standard, graphs vs plain (m)", d_std, tol_std);
+  EXPECT_LE(d_std, tol_std);
+  Report("opt, graphs vs plain (m)", d_opt, tol_opt);
+  EXPECT_LE(d_opt, tol_opt);
 }

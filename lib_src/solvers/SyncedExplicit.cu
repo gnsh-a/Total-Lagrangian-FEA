@@ -140,9 +140,11 @@ SyncedExplicitSolver::SyncedExplicitSolver(GPU_FEAT10_Data* element)
       current_time_(0.0),
       current_step_(0),
       is_initialized_(false),
-      inv_mass_ready_(false) {
+      inv_mass_ready_(false),
+      stream_(nullptr) {
   // Set default parameters
   params_.dt = 1e-6;
+  HANDLE_ERROR(cudaStreamCreate(&stream_));
 
   AllocateMemory();
 }
@@ -171,15 +173,23 @@ void SyncedExplicitSolver::FreeMemory() {
     HANDLE_ERROR(cudaFree(d_fixed_nodes_));
     d_fixed_nodes_ = nullptr;
   }
+  if (stream_) {
+    HANDLE_ERROR(cudaStreamSynchronize(stream_));
+    HANDLE_ERROR(cudaStreamDestroy(stream_));
+    stream_ = nullptr;
+  }
   is_initialized_ = false;
 }
 
 void SyncedExplicitSolver::SetParameters(void* params) {
   SyncedExplicitParams* p = static_cast<SyncedExplicitParams*>(params);
   params_ = *p;
+  graph_.Invalidate();
 }
 
 void SyncedExplicitSolver::SetFixedNodes(const std::vector<int>& fixed_nodes) {
+  graph_.Invalidate();
+
   // Free existing fixed nodes array
   if (d_fixed_nodes_) {
     HANDLE_ERROR(cudaFree(d_fixed_nodes_));
@@ -221,14 +231,33 @@ void SyncedExplicitSolver::RetrieveVelocityToCPU(Eigen::VectorXd& vel_x,
   }
 }
 
-void SyncedExplicitSolver::Solve() {
-  // Step 0: Verify lumped mass is computed
+void SyncedExplicitSolver::Solve() { SolveN(1); }
+
+void SyncedExplicitSolver::SolveN(int n) {
+  // Verify lumped mass is computed
   if (!element_->IsLumpedMassComputed()) {
     std::cerr << "SyncedExplicitSolver::Solve() - Lumped mass not computed. "
               << "Call element->CalcLumpedMassHRZ() first." << std::endl;
     return;
   }
 
+  // Once, outside any graph
+  if (!inv_mass_ready_) {
+    const int block_size = 256;
+    const int grid_size  = (n_nodes_ + block_size - 1) / block_size;
+    explicit_compute_inv_mass<<<grid_size, block_size, 0, stream_>>>(
+        d_inv_mass_, element_->GetLumpedMassDevicePtr(), n_nodes_);
+    inv_mass_ready_ = true;
+  }
+
+  graph_.Run(n, stream_, [this](cudaStream_t s) { LaunchStep(s); });
+
+  // Update time tracking
+  current_time_ += n * params_.dt;
+  current_step_ += n;
+}
+
+void SyncedExplicitSolver::LaunchStep(cudaStream_t s) {
   const int block_size = 256;
   int grid_size = (n_nodes_ + block_size - 1) / block_size;
   const int n_elem = element_->n_elem;
@@ -238,20 +267,16 @@ void SyncedExplicitSolver::Solve() {
   const int clear_grid = (n_nodes_ * 3 + block_size - 1) / block_size;
   const int node_grid = (node_threads + block_size - 1) / block_size;
 
-  if (!inv_mass_ready_) {
-    explicit_compute_inv_mass<<<grid_size, block_size>>>(
-        d_inv_mass_, element_->GetLumpedMassDevicePtr(), n_nodes_);
-    inv_mass_ready_ = true;
-  }
-
   // Step 1: Compute internal forces
-  explicit_compute_p<<<qp_grid, block_size>>>(element_->d_data, d_vel_,
-                                              params_.dt);
-  explicit_clear_internal_force<<<clear_grid, block_size>>>(element_->d_data);
-  explicit_compute_internal_force<<<node_grid, block_size>>>(element_->d_data);
+  explicit_compute_p<<<qp_grid, block_size, 0, s>>>(element_->d_data, d_vel_,
+                                                    params_.dt);
+  explicit_clear_internal_force<<<clear_grid, block_size, 0, s>>>(
+      element_->d_data);
+  explicit_compute_internal_force<<<node_grid, block_size, 0, s>>>(
+      element_->d_data);
 
   // Step 2: Update velocity
-  explicit_velocity_update<<<grid_size, block_size>>>(
+  explicit_velocity_update<<<grid_size, block_size, 0, s>>>(
       element_->d_data,
       d_vel_,
       d_inv_mass_,
@@ -260,15 +285,11 @@ void SyncedExplicitSolver::Solve() {
   // Step 3: Apply boundary conditions
   if (n_fixed_nodes_ > 0) {
     int bc_grid = (n_fixed_nodes_ + block_size - 1) / block_size;
-    explicit_apply_fixed_node_bc<<<bc_grid, block_size>>>(d_vel_, d_fixed_nodes_,
-                                                  n_fixed_nodes_);
+    explicit_apply_fixed_node_bc<<<bc_grid, block_size, 0, s>>>(
+        d_vel_, d_fixed_nodes_, n_fixed_nodes_);
   }
 
   // Step 4: Update positions
-  explicit_position_update<<<grid_size, block_size>>>(
+  explicit_position_update<<<grid_size, block_size, 0, s>>>(
       element_->d_data, d_vel_, params_.dt);
-
-  // Update time tracking
-  current_time_ += params_.dt;
-  current_step_++;
 }

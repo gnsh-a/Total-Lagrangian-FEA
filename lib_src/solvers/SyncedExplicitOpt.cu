@@ -77,9 +77,12 @@ SyncedExplicitOptSolver::SyncedExplicitOptSolver(GPU_FEAT10Opt_Data* element)
       n_fixed_nodes_(0),
       current_time_(0.0),
       current_step_(0),
-      is_initialized_(false) {
+      is_initialized_(false),
+      stream_(nullptr),
+      captured_material_{0.0f, 0.0f, 0.0f} {
   // Set default parameters
   params_.dt = 1e-6;
+  HANDLE_ERROR(cudaStreamCreate(&stream_));
 
   AllocateMemory();
 }
@@ -105,11 +108,17 @@ void SyncedExplicitOptSolver::FreeMemory() {
     HANDLE_ERROR(cudaFree(d_fixed_nodes_));
     d_fixed_nodes_ = nullptr;
   }
+  if (stream_) {
+    HANDLE_ERROR(cudaStreamSynchronize(stream_));
+    HANDLE_ERROR(cudaStreamDestroy(stream_));
+    stream_ = nullptr;
+  }
   is_initialized_ = false;
 }
 
 void SyncedExplicitOptSolver::SetParameters(const SyncedExplicitOptParams& params) {
   params_ = params;
+  graph_.Invalidate();
 }
 
 void SyncedExplicitOptSolver::SetParameters(void* params) {
@@ -117,6 +126,8 @@ void SyncedExplicitOptSolver::SetParameters(void* params) {
 }
 
 void SyncedExplicitOptSolver::SetFixedNodes(const std::vector<int>& fixed_nodes) {
+  graph_.Invalidate();
+
   // Free existing fixed nodes array
   if (d_fixed_nodes_) {
     HANDLE_ERROR(cudaFree(d_fixed_nodes_));
@@ -189,18 +200,35 @@ void SyncedExplicitOptSolver::SetVelocityFromCPU(const Eigen::VectorXd& vel_x,
                           cudaMemcpyHostToDevice));
 }
 
-void SyncedExplicitOptSolver::Solve() {
+void SyncedExplicitOptSolver::Solve() { SolveN(1); }
+
+void SyncedExplicitOptSolver::SolveN(int n) {
+  const float material[3] = {element_->mu10, element_->mu01, element_->bulkK};
+  if (material[0] != captured_material_[0] ||
+      material[1] != captured_material_[1] ||
+      material[2] != captured_material_[2]) {
+    graph_.Invalidate();
+    for (int i = 0; i < 3; i++) captured_material_[i] = material[i];
+  }
+  graph_.Run(n, stream_, [this](cudaStream_t s) { LaunchStep(s); });
+
+  // Update time tracking
+  current_time_ += n * params_.dt;
+  current_step_ += n;
+}
+
+void SyncedExplicitOptSolver::LaunchStep(cudaStream_t s) {
   const int block_size = 256;
   int node_grid = (n_nodes_ + block_size - 1) / block_size;
 
   // Step 1: Clear internal force
-  element_->ClearInternalForce();
+  element_->ClearInternalForce(s);
 
   // Step 2: Compute internal force using fused kernel
-  element_->ComputeInternalForce(d_vel_, false, false);
+  element_->ComputeInternalForce(d_vel_, false, false, s);
 
   // Step 3: Update velocity
-  syncedExplicitOpt_velocityUpdate<<<node_grid, block_size>>>(
+  syncedExplicitOpt_velocityUpdate<<<node_grid, block_size, 0, s>>>(
       d_vel_,
       element_->GetInternalForceDevicePtr(),
       element_->GetExternalForceDevicePtr(),
@@ -211,18 +239,14 @@ void SyncedExplicitOptSolver::Solve() {
   // Step 4: Apply fixed node boundary conditions
   if (n_fixed_nodes_ > 0) {
     int bc_grid = (n_fixed_nodes_ + block_size - 1) / block_size;
-    syncedExplicitOpt_applyFixedBC<<<bc_grid, block_size>>>(
+    syncedExplicitOpt_applyFixedBC<<<bc_grid, block_size, 0, s>>>(
         d_vel_, d_fixed_nodes_, n_fixed_nodes_);
   }
 
   // Step 5: Update positions
-  syncedExplicitOpt_positionUpdate<<<node_grid, block_size>>>(
+  syncedExplicitOpt_positionUpdate<<<node_grid, block_size, 0, s>>>(
       element_->GetPositionDevicePtr(),
       d_vel_,
       params_.dt,
       n_nodes_);
-
-  // Update time tracking
-  current_time_ += params_.dt;
-  current_step_++;
 }

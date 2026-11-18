@@ -14,6 +14,7 @@
 #include <cuda_runtime.h>
 
 #include <Eigen/Dense>
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -59,6 +60,7 @@ enum class MaterialKind { kSVK, kMR };
 struct Options {
   bool use_opt          = false;
   bool damp             = false;
+  ExplicitGraphMode graph = ExplicitGraphMode::kUnrolled;
   MaterialKind material = MaterialKind::kSVK;
   double dt             = 1e-5;
   int steps             = 800000;  // 800000 * 1e-5 = 8 s total (match Newton 8000*1e-3)
@@ -69,6 +71,25 @@ struct Options {
   int vtk_interval      = 0;  // 0 = disabled
   std::string vtk_dir   = "output";  // VTK output directory
 };
+
+// Step counts at which the time loop stops to talk to the host: after each
+// CSV row and VTK frame (written after step s, i.e. after s + 1 updates), at
+// the load release, and at the end. In between, the solver runs SolveN.
+std::vector<int> StopPoints(int steps, int csv_interval, bool csv,
+                            int vtk_interval, int release_step) {
+  std::vector<int> stops;
+  if (csv) {
+    for (int s = 0; s < steps; s += csv_interval) stops.push_back(s + 1);
+  }
+  if (vtk_interval > 0) {
+    for (int s = 0; s < steps; s += vtk_interval) stops.push_back(s + 1);
+  }
+  if (release_step > 0 && release_step < steps) stops.push_back(release_step);
+  stops.push_back(steps);
+  std::sort(stops.begin(), stops.end());
+  stops.erase(std::unique(stops.begin(), stops.end()), stops.end());
+  return stops;
+}
 
 bool StartsWith(const std::string& s, const std::string& prefix) {
   return s.rfind(prefix, 0) == 0;
@@ -122,6 +143,8 @@ void PrintUsage(const char* argv0) {
       << " [--opt] [--damp] [--mat=MAT] [--dt=DT] [--steps=N] [--csv[=PATH]]"
          " [--csv-interval=N] [--csv-force] [--vtk=N] [--vtk-dir=PATH] [--help]\n"
       << "  --opt            Use FEAT10Opt + SyncedExplicitOpt (default: standard)\n"
+      << "  --graph=G        off | unrolled: plain launches, or CUDA graphs of up to\n"
+      << "                   1000 steps (default unrolled)\n"
             << "  --damp           Kelvin-Voigt damping (eta = lambda = 1e2); with --opt\n"
             << "                   the kernel must be built without --config=opt_nodamp\n"
       << "  --mat=MAT        svk | mr (default: svk; ignored with --opt)\n"
@@ -143,6 +166,18 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
     }
     if (arg == "--opt") {
       opt.use_opt = true;
+      continue;
+    }
+    if (StartsWith(arg, "--graph=")) {
+      const std::string v = arg.substr(std::string("--graph=").size());
+      if (v == "off") {
+        opt.graph = ExplicitGraphMode::kOff;
+      } else if (v == "unrolled") {
+        opt.graph = ExplicitGraphMode::kUnrolled;
+      } else {
+        std::cerr << "Invalid --graph: " << v << "\n";
+        return false;
+      }
       continue;
     }
     if (arg == "--damp") {
@@ -319,7 +354,9 @@ int main(int argc, char** argv) {
   // Print run configuration
   std::cout << "Config: solver=" << (opt.use_opt ? "opt" : "standard")
             << " mat=" << (opt.use_opt ? "mr(forced)" : MaterialName(opt.material))
-            << " dt=" << opt.dt << " steps=" << opt.steps << std::endl;
+            << " dt=" << opt.dt << " steps=" << opt.steps << " graph="
+            << (opt.graph == ExplicitGraphMode::kOff ? "off" : "unrolled")
+            << std::endl;
 
   if (opt.use_opt && opt.vtk_interval > 0) {
     std::cout << "Warning: VTK output not supported with --opt, ignoring --vtk"
@@ -345,12 +382,18 @@ int main(int argc, char** argv) {
              << (opt.csv_force ? ",internal_force_l2" : "") << "\n";
   }
 
-  // Timing events for per-step Solve() measurement
+  // Timing events around the whole time loop (no per-step sync)
   cudaEvent_t timing_start, timing_stop;
   HANDLE_ERROR(cudaEventCreate(&timing_start));
   HANDLE_ERROR(cudaEventCreate(&timing_stop));
-  std::vector<double> step_times_ms;
-  step_times_ms.reserve(opt.steps);
+  float total_time_ms = 0.0f;
+  double graph_build_s = 0.0;
+  // Release at kReleaseTime; round, since 1.0 / 1e-5 truncates to 99999
+  const int force_release_step =
+      static_cast<int>(std::lround(kReleaseTime / opt.dt));
+  const std::vector<int> stops =
+      StopPoints(opt.steps, opt.csv_interval, opt.write_csv, opt.vtk_interval,
+                 force_release_step);
 
   // ================================================================
   // Optimized path: FEAT10Opt + SyncedExplicitOpt
@@ -394,35 +437,17 @@ int main(int argc, char** argv) {
     solver.SetFixedNodes(fixed_nodes);
     solver.SetExternalForce(f_ext);
 
-    // Release at kReleaseTime; round, since 1.0 / 1e-5 truncates to 99999
-    const int force_release_step =
-        static_cast<int>(std::lround(kReleaseTime / opt.dt));
-    for (int step = 0; step < opt.steps; ++step) {
-      if (step == force_release_step) {
+    solver.SetGraphMode(opt.graph);
+    HANDLE_ERROR(cudaEventRecord(timing_start));
+    int done = 0;
+    for (int stop : stops) {
+      solver.SolveN(stop - done);
+      done = stop;
+      if (done == force_release_step) {
         f_ext.setZero();
         solver.SetExternalForce(f_ext);
       }
-
-      float step_time_ms = 0.0f;
-      HANDLE_ERROR(cudaEventRecord(timing_start));
-      solver.Solve();
-      HANDLE_ERROR(cudaEventRecord(timing_stop));
-      HANDLE_ERROR(cudaEventSynchronize(timing_stop));
-      HANDLE_ERROR(cudaEventElapsedTime(&step_time_ms, timing_start, timing_stop));
-      step_times_ms.push_back(static_cast<double>(step_time_ms));
-
-      if (((step + 1) % 500) == 0 || step == opt.steps - 1) {
-        double tracked_pos[3];
-        HANDLE_ERROR(cudaMemcpy(tracked_pos,
-            gpu_feat10opt.GetPositionDevicePtr() + 3 * track_node,
-            3 * sizeof(double), cudaMemcpyDeviceToHost));
-        std::cout << "Progress: step " << (step + 1) << "/" << opt.steps
-                  << " node " << track_node << " pos = ("
-                  << std::setprecision(6) << tracked_pos[0] << ", "
-                  << tracked_pos[1] << ", " << tracked_pos[2] << ")"
-                  << std::endl;
-      }
-
+      const int step = done - 1;
       const bool is_csv_step = opt.write_csv &&
           (step % opt.csv_interval == 0 || step == opt.steps - 1);
       if (is_csv_step) {
@@ -440,6 +465,10 @@ int main(int argc, char** argv) {
         csv_file << "\n";
       }
     }
+    HANDLE_ERROR(cudaEventRecord(timing_stop));
+    HANDLE_ERROR(cudaEventSynchronize(timing_stop));
+    HANDLE_ERROR(cudaEventElapsedTime(&total_time_ms, timing_start, timing_stop));
+    graph_build_s = solver.GraphBuildSeconds();
 
     // Final position
     {
@@ -502,40 +531,17 @@ int main(int argc, char** argv) {
     solver.SetFixedNodes(fixed_nodes);
 
     int vtk_frame = 0;
-    // Release at kReleaseTime; round, since 1.0 / 1e-5 truncates to 99999
-    const int force_release_step =
-        static_cast<int>(std::lround(kReleaseTime / opt.dt));
-
-    for (int step = 0; step < opt.steps; ++step) {
-      if (step == force_release_step) {
+    solver.SetGraphMode(opt.graph);
+    HANDLE_ERROR(cudaEventRecord(timing_start));
+    int done = 0;
+    for (int stop : stops) {
+      solver.SolveN(stop - done);
+      done = stop;
+      if (done == force_release_step) {
         h_f_ext.setZero();
         gpu_t10_data.SetExternalForce(h_f_ext);
       }
-
-      float step_time_ms = 0.0f;
-      HANDLE_ERROR(cudaEventRecord(timing_start));
-      solver.Solve();
-      HANDLE_ERROR(cudaEventRecord(timing_stop));
-      HANDLE_ERROR(cudaEventSynchronize(timing_stop));
-      HANDLE_ERROR(cudaEventElapsedTime(&step_time_ms, timing_start, timing_stop));
-      step_times_ms.push_back(static_cast<double>(step_time_ms));
-
-      if (((step + 1) % 500) == 0 || step == opt.steps - 1) {
-        double x_track = 0.0, y_track = 0.0, z_track = 0.0;
-        HANDLE_ERROR(cudaMemcpy(&x_track,
-                                gpu_t10_data.GetX12DevicePtr() + track_node,
-                                sizeof(double), cudaMemcpyDeviceToHost));
-        HANDLE_ERROR(cudaMemcpy(&y_track,
-                                gpu_t10_data.GetY12DevicePtr() + track_node,
-                                sizeof(double), cudaMemcpyDeviceToHost));
-        HANDLE_ERROR(cudaMemcpy(&z_track,
-                                gpu_t10_data.GetZ12DevicePtr() + track_node,
-                                sizeof(double), cudaMemcpyDeviceToHost));
-        std::cout << "Progress: step " << (step + 1) << "/" << opt.steps
-                  << " node " << track_node << " pos = ("
-                  << std::setprecision(6) << x_track << ", " << y_track << ", "
-                  << z_track << ")" << std::endl;
-      }
+      const int step = done - 1;
 
       // VTK output
       if (opt.vtk_interval > 0 && step % opt.vtk_interval == 0) {
@@ -567,6 +573,10 @@ int main(int argc, char** argv) {
         csv_file << "\n";
       }
     }
+    HANDLE_ERROR(cudaEventRecord(timing_stop));
+    HANDLE_ERROR(cudaEventSynchronize(timing_stop));
+    HANDLE_ERROR(cudaEventElapsedTime(&total_time_ms, timing_start, timing_stop));
+    graph_build_s = solver.GraphBuildSeconds();
 
     // Final position
     {
@@ -588,14 +598,12 @@ int main(int argc, char** argv) {
     gpu_t10_data.Destroy();
   }
 
-  // Timing summary
-  if (!step_times_ms.empty()) {
-    double total_time_ms = 0.0;
-    for (double t : step_times_ms) {
-      total_time_ms += t;
-    }
-    const double avg_time_ms = total_time_ms / static_cast<double>(step_times_ms.size());
+  // Timing summary (the loop, including CSV reads and graph builds)
+  {
+    const double avg_time_ms = total_time_ms / static_cast<double>(opt.steps);
     std::cout << "\nTiming summary:" << std::endl;
+    std::cout << "  Graph build time: " << graph_build_s * 1e3 << " ms"
+              << std::endl;
     std::cout << "  Total solve time: " << total_time_ms << " ms"
               << std::endl;
     std::cout << "  Average solve step time: " << avg_time_ms << " ms"
