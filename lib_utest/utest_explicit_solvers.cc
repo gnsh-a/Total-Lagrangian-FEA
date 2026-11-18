@@ -65,18 +65,18 @@ Eigen::MatrixXd Stack(const Eigen::VectorXd& x, const Eigen::VectorXd& y,
   return p;
 }
 
-// Step pieces for SolveN in the graph tests: uneven, so the unrolled mode
-// builds several graphs and the device loop is relaunched with new counts.
+// Step pieces for SolveN in the graph test: uneven, so several graphs are
+// built and one is relaunched.
 const std::vector<int> kPieces = {1, 7, 100, 192};  // 300 steps
 
-// Advance with Solve() per step (graph off), or with SolveN over kPieces.
+// Advance with plain Solve() per step (graph off), or with graphs over kPieces.
 template <typename Solver>
 void Advance(Solver& solver, int n_steps, ExplicitGraphMode mode) {
+  solver.SetGraphMode(mode);
   if (mode == ExplicitGraphMode::kOff) {
     for (int s = 0; s < n_steps; s++) solver.Solve();
     return;
   }
-  solver.SetGraphMode(mode);
   int done = 0;
   for (int k : kPieces) {
     solver.SolveN(k);
@@ -252,33 +252,24 @@ TEST(ExplicitSolvers, FixedNodes_StayFixed) {
 // 12 eps of the force; in this linear, stable response a relative force error
 // gives at most twice that relative displacement error (step load), plus the
 // position round-off N eps |X|.
-TEST(ExplicitSolvers, GraphModes_MatchPlainLaunches) {
+TEST(ExplicitSolvers, Graphs_MatchPlainLaunches) {
   Eigen::MatrixXd X;
   Eigen::MatrixXi E;
   ReadBeamRes0(X, E);
   const std::vector<int> fixed = NodesOnFaceX0(X);
   const double a = 1.0, dt = 1e-5;
   const int n = 300;
-  const ExplicitGraphMode modes[] = {ExplicitGraphMode::kUnrolled,
-                                     ExplicitGraphMode::kDevice};
-  const char* names[] = {"unrolled", "device"};
-
   Eigen::MatrixXd ref_std = RunStandard(X, E, a, fixed, dt, n);
   Eigen::MatrixXd ref_opt = RunOpt(X, E, a, fixed, dt, n);
   const double tol_std = 2 * 12 * kEpsDouble * MaxAbs(ref_std - X) +
                          n * kEpsDouble * MaxAbs(X);
   const double tol_opt = 2 * 12 * kEpsFloat * MaxAbs(ref_opt - X) +
                          n * kEpsDouble * MaxAbs(X);
-  for (int m = 0; m < 2; m++) {
-    double d_std =
-        MaxAbs(RunStandard(X, E, a, fixed, dt, n, nullptr, modes[m]) - ref_std);
-    double d_opt = MaxAbs(RunOpt(X, E, a, fixed, dt, n, modes[m]) - ref_opt);
-    char what[64];
-    std::snprintf(what, sizeof(what), "standard, %s vs plain (m)", names[m]);
-    Report(what, d_std, tol_std);
-    EXPECT_LE(d_std, tol_std);
-    std::snprintf(what, sizeof(what), "opt, %s vs plain (m)", names[m]);
-    Report(what, d_opt, tol_opt);
-    EXPECT_LE(d_opt, tol_opt);
-  }
+  const ExplicitGraphMode g = ExplicitGraphMode::kUnrolled;
+  double d_std = MaxAbs(RunStandard(X, E, a, fixed, dt, n, nullptr, g) - ref_std);
+  double d_opt = MaxAbs(RunOpt(X, E, a, fixed, dt, n, g) - ref_opt);
+  Report("standard, graphs vs plain (m)", d_std, tol_std);
+  EXPECT_LE(d_std, tol_std);
+  Report("opt, graphs vs plain (m)", d_opt, tol_opt);
+  EXPECT_LE(d_opt, tol_opt);
 }

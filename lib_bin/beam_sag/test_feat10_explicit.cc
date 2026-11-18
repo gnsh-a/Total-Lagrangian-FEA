@@ -64,7 +64,7 @@ struct Options {
   bool use_opt          = false;
   bool damp             = false;
   bool part2            = false;
-  ExplicitGraphMode graph = ExplicitGraphMode::kOff;
+  ExplicitGraphMode graph = ExplicitGraphMode::kUnrolled;
   MaterialKind material = MaterialKind::kSVK;
   double dt             = 1e-5;
   int steps             = 5000;
@@ -82,7 +82,8 @@ void PrintUsage(const char* argv0) {
             << "  --opt            Use FEAT10Opt + SyncedExplicitOpt (default: standard)\n"
             << "  --damp           Kelvin-Voigt damping (eta = lambda = 1e2); with --opt\n"
             << "                   the kernel must be built without --config=opt_nodamp\n"
-            << "  --graph=G        off | unrolled | device: CUDA graph mode (default off)\n"
+            << "  --graph=G        off | unrolled: plain launches, or CUDA graphs of up to\n"
+            << "                   1000 steps (default unrolled)\n"
             << "  --part2          TL-FEA Part II beam: 5 kN in +x, held; beam MR at rho 2700\n"
             << "                   (default: 10 kN in +z, released at steps/2; bunny MR at rho 920)\n"
             << "  --mat=MAT        svk | mr (default: svk; ignored with --opt, forces MR)\n"
@@ -182,8 +183,6 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
         opt.graph = ExplicitGraphMode::kOff;
       } else if (v == "unrolled") {
         opt.graph = ExplicitGraphMode::kUnrolled;
-      } else if (v == "device") {
-        opt.graph = ExplicitGraphMode::kDevice;
       } else {
         std::cerr << "Invalid --graph: " << v << "\n";
         return false;
@@ -337,9 +336,7 @@ int main(int argc, char** argv) {
             << " mat=" << (opt.use_opt ? "mr(forced)" : MaterialName(opt.material))
             << " res=" << opt.res << " dt=" << opt.dt
             << " steps=" << opt.steps << " graph="
-            << (opt.graph == ExplicitGraphMode::kOff        ? "off"
-                : opt.graph == ExplicitGraphMode::kUnrolled ? "unrolled"
-                                                            : "device")
+            << (opt.graph == ExplicitGraphMode::kOff ? "off" : "unrolled")
             << std::endl;
 
   if (n_nodes <= plot_target_node) {

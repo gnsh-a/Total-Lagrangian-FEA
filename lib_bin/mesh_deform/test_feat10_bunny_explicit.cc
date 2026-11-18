@@ -60,7 +60,7 @@ enum class MaterialKind { kSVK, kMR };
 struct Options {
   bool use_opt          = false;
   bool damp             = false;
-  ExplicitGraphMode graph = ExplicitGraphMode::kOff;
+  ExplicitGraphMode graph = ExplicitGraphMode::kUnrolled;
   MaterialKind material = MaterialKind::kSVK;
   double dt             = 1e-5;
   int steps             = 800000;  // 800000 * 1e-5 = 8 s total (match Newton 8000*1e-3)
@@ -143,7 +143,8 @@ void PrintUsage(const char* argv0) {
       << " [--opt] [--damp] [--mat=MAT] [--dt=DT] [--steps=N] [--csv[=PATH]]"
          " [--csv-interval=N] [--csv-force] [--vtk=N] [--vtk-dir=PATH] [--help]\n"
       << "  --opt            Use FEAT10Opt + SyncedExplicitOpt (default: standard)\n"
-      << "  --graph=G        off | unrolled | device: CUDA graph mode (default off)\n"
+      << "  --graph=G        off | unrolled: plain launches, or CUDA graphs of up to\n"
+      << "                   1000 steps (default unrolled)\n"
             << "  --damp           Kelvin-Voigt damping (eta = lambda = 1e2); with --opt\n"
             << "                   the kernel must be built without --config=opt_nodamp\n"
       << "  --mat=MAT        svk | mr (default: svk; ignored with --opt)\n"
@@ -173,8 +174,6 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
         opt.graph = ExplicitGraphMode::kOff;
       } else if (v == "unrolled") {
         opt.graph = ExplicitGraphMode::kUnrolled;
-      } else if (v == "device") {
-        opt.graph = ExplicitGraphMode::kDevice;
       } else {
         std::cerr << "Invalid --graph: " << v << "\n";
         return false;
@@ -356,9 +355,7 @@ int main(int argc, char** argv) {
   std::cout << "Config: solver=" << (opt.use_opt ? "opt" : "standard")
             << " mat=" << (opt.use_opt ? "mr(forced)" : MaterialName(opt.material))
             << " dt=" << opt.dt << " steps=" << opt.steps << " graph="
-            << (opt.graph == ExplicitGraphMode::kOff        ? "off"
-                : opt.graph == ExplicitGraphMode::kUnrolled ? "unrolled"
-                                                            : "device")
+            << (opt.graph == ExplicitGraphMode::kOff ? "off" : "unrolled")
             << std::endl;
 
   if (opt.use_opt && opt.vtk_interval > 0) {

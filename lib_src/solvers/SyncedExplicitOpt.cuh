@@ -49,7 +49,7 @@ class SyncedExplicitOptSolver : public SolverBase {
   // after it.
   void SolveN(int n);
 
-  // Plain launches, or a CUDA graph (n steps unrolled, or a device-side loop).
+  // CUDA graphs of up to 1000 steps (default), or plain launches.
   void SetGraphMode(ExplicitGraphMode mode) { graph_.SetMode(mode); }
   double GraphBuildSeconds() const { return graph_.BuildSeconds(); }
 

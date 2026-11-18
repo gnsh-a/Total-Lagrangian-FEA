@@ -194,7 +194,6 @@ cc_test(
         "-L/usr/local/cuda/lib64",
         "-lcusparse",
         "-lcudart",
-        "-lcudadevrt",
     ],
     data = ["//:data_meshes"],
     deps = [

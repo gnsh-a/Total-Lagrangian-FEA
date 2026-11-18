@@ -140,14 +140,12 @@ cuda_library(
     ],
 )
 
-# CUDA graph runner for the explicit solvers. Relocatable device code: the
-# device-side loop sets its while-condition from a kernel (needs cudadevrt).
+# CUDA graph runner for the explicit solvers.
 cuda_library(
     name = "explicit_step_graph",
     srcs = ["ExplicitStepGraph.cu"],
     hdrs = ["ExplicitStepGraph.cuh"],
     copts = ["--std=c++17", "-O3"],
-    rdc = True,
     deps = ["//lib_utils:cuda_utils"],
 )
 
