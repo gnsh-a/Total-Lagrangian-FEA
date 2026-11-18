@@ -139,14 +139,14 @@ struct GPU_FEAT10Opt_Data {
   // Compute HRZ lumped mass (stores 1 / m_i).
   void ComputeLumpedMassHRZ();
 
-  // Zero internal force buffer.
-  void ClearInternalForce();
+  // Zero internal force buffer (on `stream`, asynchronously).
+  void ClearInternalForce(cudaStream_t stream = 0);
 
   // Compute internal forces (optionally writing F and P). Pass velocity pointer
   // for Kelvin-Voigt damping. Use nullptr for purely elastic force.
   // TODO: make this optional and use a flag
   void ComputeInternalForce(const double* d_vel_nodes, bool writeOutF = false,
-                            bool writeOutP = false);
+                            bool writeOutP = false, cudaStream_t stream = 0);
 
   // Set external force from CPU.
   void SetExternalForce(const Eigen::VectorXf& f_ext);
@@ -221,4 +221,5 @@ struct GPU_FEAT10Opt_Data {
 void launchInternalForceKernel_FEAT10Opt(const GPU_FEAT10Opt_Data* host_data,
                                          int n_elem_padded,
                                          const double* d_vel_nodes,
-                                         bool writeOutF, bool writeOutP);
+                                         bool writeOutF, bool writeOutP,
+                                         cudaStream_t stream);

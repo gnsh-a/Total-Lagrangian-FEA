@@ -12,6 +12,7 @@
 #include <cuda_runtime.h>
 
 #include <Eigen/Dense>
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -63,6 +64,7 @@ struct Options {
   bool use_opt          = false;
   bool damp             = false;
   bool part2            = false;
+  ExplicitGraphMode graph = ExplicitGraphMode::kOff;
   MaterialKind material = MaterialKind::kSVK;
   double dt             = 1e-5;
   int steps             = 5000;
@@ -80,6 +82,7 @@ void PrintUsage(const char* argv0) {
             << "  --opt            Use FEAT10Opt + SyncedExplicitOpt (default: standard)\n"
             << "  --damp           Kelvin-Voigt damping (eta = lambda = 1e2); with --opt\n"
             << "                   the kernel must be built without --config=opt_nodamp\n"
+            << "  --graph=G        off | unrolled | device: CUDA graph mode (default off)\n"
             << "  --part2          TL-FEA Part II beam: 5 kN in +x, held; beam MR at rho 2700\n"
             << "                   (default: 10 kN in +z, released at steps/2; bunny MR at rho 920)\n"
             << "  --mat=MAT        svk | mr (default: svk; ignored with --opt, forces MR)\n"
@@ -90,6 +93,22 @@ void PrintUsage(const char* argv0) {
             << "  --csv-interval=N Write CSV row every N steps (default: 1)\n"
             << "  --csv-force      Include internal_force_l2 column in CSV\n"
             << "  --help           Show this message\n";
+}
+
+// Step counts at which the time loop stops to talk to the host: after each
+// CSV row (row s is written after step s, i.e. after s + 1 updates), at the
+// load release, and at the end. In between, the solver runs SolveN.
+std::vector<int> StopPoints(int steps, int csv_interval, bool csv,
+                            int release_step) {
+  std::vector<int> stops;
+  if (csv) {
+    for (int s = 0; s < steps; s += csv_interval) stops.push_back(s + 1);
+  }
+  if (release_step > 0 && release_step < steps) stops.push_back(release_step);
+  stops.push_back(steps);
+  std::sort(stops.begin(), stops.end());
+  stops.erase(std::unique(stops.begin(), stops.end()), stops.end());
+  return stops;
 }
 
 bool StartsWith(const std::string& s, const std::string& prefix) {
@@ -155,6 +174,20 @@ bool ParseArgs(int argc, char** argv, Options& opt) {
     }
     if (arg == "--part2") {
       opt.part2 = true;
+      continue;
+    }
+    if (StartsWith(arg, "--graph=")) {
+      const std::string v = arg.substr(std::string("--graph=").size());
+      if (v == "off") {
+        opt.graph = ExplicitGraphMode::kOff;
+      } else if (v == "unrolled") {
+        opt.graph = ExplicitGraphMode::kUnrolled;
+      } else if (v == "device") {
+        opt.graph = ExplicitGraphMode::kDevice;
+      } else {
+        std::cerr << "Invalid --graph: " << v << "\n";
+        return false;
+      }
       continue;
     }
     if (StartsWith(arg, "--mat=")) {
@@ -303,7 +336,11 @@ int main(int argc, char** argv) {
   std::cout << "Config: solver=" << (opt.use_opt ? "opt" : "standard")
             << " mat=" << (opt.use_opt ? "mr(forced)" : MaterialName(opt.material))
             << " res=" << opt.res << " dt=" << opt.dt
-            << " steps=" << opt.steps << std::endl;
+            << " steps=" << opt.steps << " graph="
+            << (opt.graph == ExplicitGraphMode::kOff        ? "off"
+                : opt.graph == ExplicitGraphMode::kUnrolled ? "unrolled"
+                                                            : "device")
+            << std::endl;
 
   if (n_nodes <= plot_target_node) {
     std::cerr << "Mesh too small for node " << plot_target_node << " tracking."
@@ -366,12 +403,14 @@ int main(int argc, char** argv) {
              << (opt.csv_force ? ",internal_force_l2" : "") << "\n";
   }
 
-  // Timing events for per-step Solve() measurement
+  // Timing events around the whole time loop (no per-step sync)
   cudaEvent_t timing_start, timing_stop;
   HANDLE_ERROR(cudaEventCreate(&timing_start));
   HANDLE_ERROR(cudaEventCreate(&timing_stop));
-  std::vector<double> step_times_ms;
-  step_times_ms.reserve(opt.steps);
+  float total_time_ms = 0.0f;
+  double graph_build_s = 0.0;
+  const std::vector<int> stops =
+      StopPoints(opt.steps, opt.csv_interval, opt.write_csv, release_step);
 
   // ================================================================
   // Optimized path: FEAT10Opt + SyncedExplicitOpt
@@ -418,25 +457,17 @@ int main(int argc, char** argv) {
     solver.SetFixedNodes(fixed_nodes);
     solver.SetExternalForce(f_ext);
 
-    for (int step = 0; step < opt.steps; ++step) {
-      if (step == release_step) {
+    solver.SetGraphMode(opt.graph);
+    HANDLE_ERROR(cudaEventRecord(timing_start));
+    int done = 0;
+    for (int stop : stops) {
+      solver.SolveN(stop - done);
+      done = stop;
+      if (done == release_step) {
         f_ext.setZero();
         solver.SetExternalForce(f_ext);
       }
-
-      float step_time_ms = 0.0f;
-      HANDLE_ERROR(cudaEventRecord(timing_start));
-      solver.Solve();
-      HANDLE_ERROR(cudaEventRecord(timing_stop));
-      HANDLE_ERROR(cudaEventSynchronize(timing_stop));
-      HANDLE_ERROR(cudaEventElapsedTime(&step_time_ms, timing_start, timing_stop));
-      step_times_ms.push_back(static_cast<double>(step_time_ms));
-
-      if (((step + 1) % 500) == 0 || step == opt.steps - 1) {
-        std::cout << "Progress: step " << (step + 1) << "/" << opt.steps
-                  << std::endl;
-      }
-
+      const int step = done - 1;
       const bool is_csv_step = opt.write_csv &&
           (step % opt.csv_interval == 0 || step == opt.steps - 1);
       if (is_csv_step) {
@@ -454,6 +485,10 @@ int main(int argc, char** argv) {
         csv_file << "\n";
       }
     }
+    HANDLE_ERROR(cudaEventRecord(timing_stop));
+    HANDLE_ERROR(cudaEventSynchronize(timing_stop));
+    HANDLE_ERROR(cudaEventElapsedTime(&total_time_ms, timing_start, timing_stop));
+    graph_build_s = solver.GraphBuildSeconds();
 
     // Final position
     {
@@ -518,25 +553,17 @@ int main(int argc, char** argv) {
     solver.SetParameters(&params);
     solver.SetFixedNodes(fixed_nodes);
 
-    for (int step = 0; step < opt.steps; ++step) {
-      if (step == release_step) {
+    solver.SetGraphMode(opt.graph);
+    HANDLE_ERROR(cudaEventRecord(timing_start));
+    int done = 0;
+    for (int stop : stops) {
+      solver.SolveN(stop - done);
+      done = stop;
+      if (done == release_step) {
         h_f_ext.setZero();
         gpu_t10_data.SetExternalForce(h_f_ext);
       }
-
-      float step_time_ms = 0.0f;
-      HANDLE_ERROR(cudaEventRecord(timing_start));
-      solver.Solve();
-      HANDLE_ERROR(cudaEventRecord(timing_stop));
-      HANDLE_ERROR(cudaEventSynchronize(timing_stop));
-      HANDLE_ERROR(cudaEventElapsedTime(&step_time_ms, timing_start, timing_stop));
-      step_times_ms.push_back(static_cast<double>(step_time_ms));
-
-      if (((step + 1) % 500) == 0 || step == opt.steps - 1) {
-        std::cout << "Progress: step " << (step + 1) << "/" << opt.steps
-                  << std::endl;
-      }
-
+      const int step = done - 1;
       const bool is_csv_step = opt.write_csv &&
           (step % opt.csv_interval == 0 || step == opt.steps - 1);
       if (is_csv_step) {
@@ -560,6 +587,10 @@ int main(int argc, char** argv) {
         csv_file << "\n";
       }
     }
+    HANDLE_ERROR(cudaEventRecord(timing_stop));
+    HANDLE_ERROR(cudaEventSynchronize(timing_stop));
+    HANDLE_ERROR(cudaEventElapsedTime(&total_time_ms, timing_start, timing_stop));
+    graph_build_s = solver.GraphBuildSeconds();
 
     // Final position
     {
@@ -581,14 +612,12 @@ int main(int argc, char** argv) {
     gpu_t10_data.Destroy();
   }
 
-  // Timing summary
-  if (!step_times_ms.empty()) {
-    double total_time_ms = 0.0;
-    for (double t : step_times_ms) {
-      total_time_ms += t;
-    }
-    const double avg_time_ms = total_time_ms / static_cast<double>(step_times_ms.size());
+  // Timing summary (the loop, including CSV reads and graph builds)
+  {
+    const double avg_time_ms = total_time_ms / static_cast<double>(opt.steps);
     std::cout << "\nTiming summary:" << std::endl;
+    std::cout << "  Graph build time: " << graph_build_s * 1e3 << " ms"
+              << std::endl;
     std::cout << "  Total solve time: " << total_time_ms << " ms"
               << std::endl;
     std::cout << "  Average solve step time: " << avg_time_ms << " ms"

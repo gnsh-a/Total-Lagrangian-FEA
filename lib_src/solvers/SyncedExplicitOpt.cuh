@@ -18,6 +18,7 @@
 
 #include "../../lib_utils/cuda_utils.h"
 #include "../elements/FEAT10DataOpt.cuh"
+#include "ExplicitStepGraph.cuh"
 #include "SolverBase.h"
 
 // Solver parameters.
@@ -43,6 +44,15 @@ class SyncedExplicitOptSolver : public SolverBase {
   // Advance simulation by one time step.
   void Solve() override;
 
+  // Advance by n time steps on the solver's stream, without waiting for the
+  // GPU; CUDA calls on the default stream (copies to and from the host) order
+  // after it.
+  void SolveN(int n);
+
+  // Plain launches, or a CUDA graph (n steps unrolled, or a device-side loop).
+  void SetGraphMode(ExplicitGraphMode mode) { graph_.SetMode(mode); }
+  double GraphBuildSeconds() const { return graph_.BuildSeconds(); }
+
   // Set solver parameters.
   void SetParameters(const SyncedExplicitOptParams& params);
 
@@ -50,7 +60,10 @@ class SyncedExplicitOptSolver : public SolverBase {
   void SetParameters(void* params) override;
 
   // Set time step.
-  void SetTimeStep(double dt) { params_.dt = dt; }
+  void SetTimeStep(double dt) {
+    params_.dt = dt;
+    graph_.Invalidate();
+  }
 
   // Boundary conditions
   // Set fixed (Dirichlet) nodes.
@@ -111,7 +124,14 @@ class SyncedExplicitOptSolver : public SolverBase {
   // Internal state
   bool is_initialized_;
 
+  // Stream and graphs. The graphs capture dt, the fixed-node array and the
+  // material constants by value; captured_material_ detects a changed material.
+  cudaStream_t stream_;
+  ExplicitStepGraph graph_;
+  float captured_material_[3];
+
   // Internal methods
   void AllocateMemory();
   void FreeMemory();
+  void LaunchStep(cudaStream_t s);
 };

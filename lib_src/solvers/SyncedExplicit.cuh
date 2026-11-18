@@ -16,6 +16,7 @@
 #include "../../lib_utils/cuda_utils.h"
 #include "../elements/ElementBase.h"
 #include "../elements/FEAT10Data.cuh"
+#include "ExplicitStepGraph.cuh"
 #include "SolverBase.h"
 
 struct SyncedExplicitParams {
@@ -30,6 +31,15 @@ class SyncedExplicitSolver : public SolverBase {
   // SolverBase interface
   void Solve() override;
   void SetParameters(void* params) override;
+
+  // Advance by n time steps on the solver's stream, without waiting for the
+  // GPU; CUDA calls on the default stream (copies to and from the host) order
+  // after it.
+  void SolveN(int n);
+
+  // Plain launches, or a CUDA graph (n steps unrolled, or a device-side loop).
+  void SetGraphMode(ExplicitGraphMode mode) { graph_.SetMode(mode); }
+  double GraphBuildSeconds() const { return graph_.BuildSeconds(); }
 
   // Accessors for state
   double* d_velocity() { return d_vel_; }
@@ -67,7 +77,12 @@ class SyncedExplicitSolver : public SolverBase {
   bool is_initialized_;
   bool inv_mass_ready_;
 
+  // Stream and graphs; the graphs capture dt and the fixed-node array by value.
+  cudaStream_t stream_;
+  ExplicitStepGraph graph_;
+
   // Internal methods
   void AllocateMemory();
   void FreeMemory();
+  void LaunchStep(cudaStream_t s);
 };

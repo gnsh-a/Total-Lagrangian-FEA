@@ -50,6 +50,7 @@ cc_binary(
     linkopts = [
         "-L/usr/local/cuda/lib64",
         "-lcudart",
+        "-lcudadevrt",
     ],
     deps = [
         "//lib_src/elements:FEAT10Data",
