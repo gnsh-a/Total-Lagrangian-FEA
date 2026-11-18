@@ -98,7 +98,11 @@ int main(int argc, char** argv) {
   std::cout << "========================================" << std::endl;
 
   const double gravity = -9.81;
-  const double dt      = 5e-4;
+  double dt            = 5e-4;
+  double gravity_ramp  = 0.0;  // s; 0 = full gravity from the first step
+  double tangent_ramp  = 0.0;  // s; full normal gravity, along-slope part ramped (tilt test)
+  double eta_damp      = 2e4;  // Kelvin-Voigt eta = lambda (Pa s)
+  bool mass_from_fe    = false;
 
   const double contact_cor_default      = 0.0;
   const double contact_mu_s_default     = 0.25;
@@ -141,6 +145,15 @@ int main(int argc, char** argv) {
     cli.AddDouble("mu_s", contact_mu_s_default, "contact static friction mu_s");
     cli.AddDouble("mu_k", contact_mu_k_default, "contact kinetic friction mu_k");
     cli.AddInt("steps", max_steps, "max simulation steps");
+    cli.AddDouble("dt", dt, "time step (s)");
+    cli.AddDouble("tangent_ramp", tangent_ramp,
+                  "keep gravity's slope-normal part, ramp its along-slope part from 0 "
+                  "over this time (s); 0 = off");
+    cli.AddDouble("gravity_ramp", gravity_ramp,
+                  "ramp gravity linearly from 0 to g over this time (s); 0 = off");
+    cli.AddDouble("eta_damp", eta_damp, "Kelvin-Voigt damping, eta = lambda (Pa s)");
+    cli.AddBool("mass_from_fe", mass_from_fe,
+                "give DEME the FE brick mass (lumped-mass sum) instead of 1 kg");
     cli.AddInt("export_interval", export_interval,
                "VTK export interval (0 disables)");
     cli.AddString("out_suffix", "", "suffix appended to output folder name");
@@ -165,6 +178,11 @@ int main(int argc, char** argv) {
     contact_mu_s    = cli.GetDouble("mu_s");
     contact_mu_k    = cli.GetDouble("mu_k");
     max_steps       = cli.GetInt("steps");
+    dt              = cli.GetDouble("dt");
+    gravity_ramp    = cli.GetDouble("gravity_ramp");
+    tangent_ramp    = cli.GetDouble("tangent_ramp");
+    eta_damp        = cli.GetDouble("eta_damp");
+    mass_from_fe    = cli.GetBool("mass_from_fe");
     export_interval = cli.GetInt("export_interval");
     out_suffix      = cli.GetString("out_suffix");
     rigid_equiv_enabled = cli.IsSet("rigid_equiv_csv");
@@ -561,7 +579,7 @@ int main(int argc, char** argv) {
                      h_z12, elements);
 
   const SolidMaterialProperties mat_default =
-      SolidMaterialProperties::SVK(young_E, 0.3, slope_rho0, 2e4, 2e4);
+      SolidMaterialProperties::SVK(young_E, 0.3, slope_rho0, eta_damp, eta_damp);
   gpu_t10_data.ApplyMaterial(mat_default);
 
   gpu_t10_data.SetDensityForElementRange(inst_slope.element_offset,
@@ -628,7 +646,12 @@ int main(int argc, char** argv) {
     body.surface            = std::move(brick_surface);
     body.family             = 1;
     body.split_into_patches = true;
-    body.mass               = static_cast<float>(brick_mass_kg);
+    double fe_brick_mass = 0.0;
+    for (int i = 0; i < inst_brick.num_nodes; ++i) {
+      fe_brick_mass += lumped_mass(inst_brick.node_offset + i);
+    }
+    std::cout << "Brick FE mass (lumped sum): " << fe_brick_mass << " kg" << std::endl;
+    body.mass = static_cast<float>(mass_from_fe ? fe_brick_mass : brick_mass_kg);
     bodies.push_back(std::move(body));
   }
 
@@ -660,6 +683,22 @@ int main(int argc, char** argv) {
   HANDLE_ERROR(cudaMemcpy(d_f_gravity, h_f_gravity.data(),
                           n_nodes * 3 * sizeof(double),
                           cudaMemcpyHostToDevice));
+
+  // Along-slope part of gravity (for --tangent_ramp): f_t = f - (f.n) n, n = slope normal.
+  double* d_f_gravity_t = nullptr;
+  if (tangent_ramp > 0.0) {
+    const Eigen::Vector3d n_slope =
+        Eigen::Vector3d(-std::tan(alpha), 0.0, 1.0).normalized();
+    Eigen::VectorXd h_f_gravity_t = h_f_gravity;
+    for (int i = 0; i < n_nodes; ++i) {
+      const Eigen::Vector3d f = h_f_gravity.segment<3>(3 * i);
+      h_f_gravity_t.segment<3>(3 * i) = f - f.dot(n_slope) * n_slope;
+    }
+    HANDLE_ERROR(cudaMalloc(&d_f_gravity_t, n_nodes * 3 * sizeof(double)));
+    HANDLE_ERROR(cudaMemcpy(d_f_gravity_t, h_f_gravity_t.data(),
+                            n_nodes * 3 * sizeof(double),
+                            cudaMemcpyHostToDevice));
+  }
 
   cublasHandle_t cublas_handle = nullptr;
   CheckCublas(cublasCreate(&cublas_handle), "cublasCreate");
@@ -699,6 +738,19 @@ int main(int argc, char** argv) {
     HANDLE_ERROR(cudaMemcpy(gpu_t10_data.GetExternalForceDevicePtr(),
                             d_f_gravity, n_nodes * 3 * sizeof(double),
                             cudaMemcpyDeviceToDevice));
+    if (gravity_ramp > 0.0 && (step + 1) * dt < gravity_ramp) {
+      const double g_scale = (step + 1) * dt / gravity_ramp;
+      CheckCublas(cublasDscal(cublas_handle, n_nodes * 3, &g_scale,
+                              gpu_t10_data.GetExternalForceDevicePtr(), 1),
+                  "cublasDscal(gravity ramp)");
+    }
+    if (d_f_gravity_t != nullptr && (step + 1) * dt < tangent_ramp) {
+      // f = f_full + (r - 1) f_t: normal part unchanged, along-slope part scaled by r
+      const double t_scale = (step + 1) * dt / tangent_ramp - 1.0;
+      CheckCublas(cublasDaxpy(cublas_handle, n_nodes * 3, &t_scale, d_f_gravity_t, 1,
+                              gpu_t10_data.GetExternalForceDevicePtr(), 1),
+                  "cublasDaxpy(tangent ramp)");
+    }
 
     if (num_contacts > 0) {
       const double alpha_axpy = 1.0;
@@ -761,6 +813,7 @@ int main(int argc, char** argv) {
   cublasDestroy(cublas_handle);
   HANDLE_ERROR(cudaFree(d_nodes_collision));
   HANDLE_ERROR(cudaFree(d_f_gravity));
+  if (d_f_gravity_t != nullptr) HANDLE_ERROR(cudaFree(d_f_gravity_t));
   gpu_t10_data.Destroy();
 
   std::cout << "Output files in: " << output_dir << "/" << std::endl;
